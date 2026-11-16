@@ -23,7 +23,8 @@ impl Session {
     /// Rebuild a native listing URL for a complete scan.
     /// Remove search/type/provider and paging filters inherited from the browser UI,
     /// then append this task's parent and cursor using URL encoding.
-    pub fn page_url(&self, task: &PageTask) -> Result<String, String> {
+    /// `limit` requests a larger page than the service default; `None` omits it.
+    pub fn page_url(&self, task: &PageTask, limit: Option<u32>) -> Result<String, String> {
         let mut u = url::Url::parse(&self.url).map_err(|_| "Invalid service URL")?;
         if u.scheme() != "https"
             || u.host_str() != Some("chatgpt.com")
@@ -36,6 +37,7 @@ impl Session {
             .filter(|(k, _)| {
                 ![
                     "cursor",
+                    "limit",
                     "parent_directory_id",
                     "include_hidden_files",
                     "include_files",
@@ -66,18 +68,47 @@ impl Session {
             if let Some(c) = &task.cursor {
                 q.append_pair("cursor", c);
             }
+            if let Some(n) = limit {
+                q.append_pair("limit", &n.to_string());
+            }
         }
         Ok(u.into())
     }
 }
 
-/// Fetch only approved listing/usage endpoints and post a generation-tagged result.
-/// The browser request times out and rejects oversized text before JSON parsing.
+/// Take the awaited JavaScript value out of a `Runtime.evaluate` reply without copying it.
+/// Protocol failures and JavaScript exceptions become errors, never successful data.
+fn evaluated(
+    result: windows::core::Result<()>,
+    output: String,
+    failure: &str,
+) -> Result<serde_json::Value, String> {
+    result.map_err(|_| "Browser connection failed".to_string())?;
+    let mut reply: serde_json::Value =
+        serde_json::from_str(&output).map_err(|_| "Invalid browser response")?;
+    if reply.get("exceptionDetails").is_some() {
+        return Err(failure.into());
+    }
+    reply
+        .pointer_mut("/result/value")
+        .map(serde_json::Value::take)
+        .ok_or_else(|| "Missing service response".into())
+}
+
+/// Fetch only approved listing/usage endpoints and post a tagged result.
+/// `request` identifies the individual call, so several listing pages can be
+/// outstanding at once and replies to abandoned requests stay inert.
+///
+/// The browser script times out each attempt, rejects oversized text before JSON
+/// parsing, and retries only throttling/gateway statuses (a GET listing is safe to
+/// repeat). With `slim`, listing items are reduced to `ROW_FIELDS` before they cross
+/// the bridge; the `items`/`cursor` shape is preserved so validation still applies.
 pub fn get(
     view: &wry::WebView,
     session: &Session,
     url: &str,
-    generation: u64,
+    slim: bool,
+    request: u64,
     proxy: EventLoopProxy<AppEvent>,
 ) -> Result<(), String> {
     if !view
@@ -97,26 +128,44 @@ pub fn get(
     {
         return Err("Request outside the Library scope".into());
     }
-    let args = serde_json::json!({"url":url,"authorization":session.authorization,"account":session.account});
+    let fields = slim.then_some(crate::inventory::ROW_FIELDS);
+    let args = serde_json::json!({"url":url,"authorization":session.authorization,"account":session.account,"fields":fields});
     let script = format!(
-        r#"(async()=>{{if(location.origin!=='https://chatgpt.com')throw new Error('Sign-in required');const a={args};const c=new AbortController();const t=setTimeout(()=>c.abort(),30000);try{{const headers={{Authorization:a.authorization}};if(a.account)headers['ChatGPT-Account-ID']=a.account;const r=await fetch(a.url,{{method:'GET',credentials:'include',headers,signal:c.signal}});const text=await r.text();if(text.length>2097152)throw new Error('Listing response too large');return {{status:r.status,body:JSON.parse(text)}}}}finally{{clearTimeout(t)}}}})()"#
+        r#"(async()=>{{
+      if(location.origin!=='https://chatgpt.com')throw new Error('Sign-in required');
+      const a={args},headers={{Authorization:a.authorization}};
+      if(a.account)headers['ChatGPT-Account-ID']=a.account;
+      const pick=item=>{{if(item===null||typeof item!=='object')return item;const out={{}};for(const k of a.fields)if(k in item)out[k]=item[k];return out}};
+      for(let attempt=0;;attempt++){{
+        const c=new AbortController(),t=setTimeout(()=>c.abort(),30000);
+        try{{
+          const r=await fetch(a.url,{{method:'GET',credentials:'include',headers,signal:c.signal}});
+          // Throttling and gateway errors are transient; back off briefly instead of failing the scan.
+          if([429,502,503,504].includes(r.status)&&attempt<3){{
+            const wait=Math.min(Number(r.headers.get('retry-after'))*1000||500*2**attempt,8000);
+            try{{await r.body?.cancel()}}catch{{}}
+            await new Promise(done=>setTimeout(done,wait));
+            continue;
+          }}
+          const text=await r.text();
+          if(text.length>2097152)throw new Error('Listing response too large');
+          // A non-JSON error page still reports its HTTP status to the coordinator.
+          let body=null;try{{body=JSON.parse(text)}}catch{{}}
+          if(a.fields&&body&&Array.isArray(body.items))body={{items:body.items.map(pick),cursor:body.cursor}};
+          return {{status:r.status,body}};
+        }}finally{{clearTimeout(t)}}
+      }}
+    }})()"#
     );
     let params = serde_json::json!({"expression":script,"awaitPromise":true,"returnByValue":true});
     let callback =
         CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, output| {
-            let parsed = (|| {
-                result.map_err(|_| "Browser request failed".to_string())?;
-                let value: serde_json::Value =
-                    serde_json::from_str(&output).map_err(|_| "Invalid browser result")?;
-                if value.get("exceptionDetails").is_some() {
-                    return Err("Request failed or timed out. Refresh ChatGPT and retry.".into());
-                }
-                value
-                    .pointer("/result/value")
-                    .cloned()
-                    .ok_or_else(|| "Missing service response".into())
-            })();
-            let _ = proxy.send_event(AppEvent::ApiResult(generation, parsed));
+            let parsed = evaluated(
+                result,
+                output,
+                "Request failed or timed out. Refresh ChatGPT and retry.",
+            );
+            let _ = proxy.send_event(AppEvent::ApiResult(request, parsed));
             Ok(())
         }));
     // SAFETY: the WebView COM interface is used on its owning UI thread; the generated
@@ -141,18 +190,11 @@ pub fn evaluate_json(
     let params = serde_json::json!({"expression":script,"awaitPromise":true,"returnByValue":true});
     let callback =
         CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, output| {
-            let value = (|| {
-                result.map_err(|_| "Browser connection failed".to_string())?;
-                let v: serde_json::Value =
-                    serde_json::from_str(&output).map_err(|_| "Invalid browser response")?;
-                if v.get("exceptionDetails").is_some() {
-                    return Err("Request failed or timed out; refresh before retrying.".into());
-                }
-                v.pointer("/result/value")
-                    .cloned()
-                    .ok_or_else(|| "Missing service result".into())
-            })();
-            done(value);
+            done(evaluated(
+                result,
+                output,
+                "Request failed or timed out; refresh before retrying.",
+            ));
             Ok(())
         }));
     // SAFETY: the WebView COM interface is used on its owning UI thread; the generated
@@ -192,10 +234,13 @@ mod tests {
     fn full_scan_cannot_inherit_native_search_or_type_filters() {
         let s=Session{url:"https://chatgpt.com/backend-api/files/library/nodes?entry_surface=spaces&q=secret&categories=image&source=uploaded&include_files=false&include_hidden_files=false".into(),authorization:"not-exported".into(),account:None};
         let url = s
-            .page_url(&PageTask {
-                parent: None,
-                cursor: Some("a&b=c".into()),
-            })
+            .page_url(
+                &PageTask {
+                    parent: None,
+                    cursor: Some("a&b=c".into()),
+                },
+                None,
+            )
             .unwrap();
         let parsed = url::Url::parse(&url).unwrap();
         let q: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
@@ -205,7 +250,31 @@ mod tests {
         assert_eq!(q["include_files"], "true");
         assert_eq!(q["include_hidden_files"], "true");
         assert_eq!(q["cursor"], "a&b=c");
+        assert!(!q.contains_key("limit"));
         assert!(!url.contains("not-exported"));
+    }
+    #[test]
+    fn page_size_is_app_controlled_and_never_inherited() {
+        let s = Session {
+            url: "https://chatgpt.com/backend-api/files/library/nodes?entry_surface=spaces&limit=5"
+                .into(),
+            authorization: "not-exported".into(),
+            account: None,
+        };
+        let task = PageTask {
+            parent: Some("libdir_a".into()),
+            cursor: None,
+        };
+        let sized = url::Url::parse(&s.page_url(&task, Some(100)).unwrap()).unwrap();
+        let limits: Vec<_> = sized
+            .query_pairs()
+            .filter(|(k, _)| k == "limit")
+            .map(|(_, v)| v.into_owned())
+            .collect();
+        assert_eq!(limits, ["100"]);
+        let default = s.page_url(&task, None).unwrap();
+        assert!(!default.contains("limit="));
+        assert!(default.contains("parent_directory_id=libdir_a"));
     }
     #[test]
     fn endpoint_context_is_not_reusable_on_another_host() {
@@ -215,10 +284,13 @@ mod tests {
             account: None,
         };
         assert!(
-            s.page_url(&PageTask {
-                parent: None,
-                cursor: None
-            })
+            s.page_url(
+                &PageTask {
+                    parent: None,
+                    cursor: None
+                },
+                None
+            )
             .is_err()
         );
     }

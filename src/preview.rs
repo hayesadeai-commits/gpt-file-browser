@@ -19,7 +19,8 @@ pub fn supported(row: &FileRow) -> bool {
 
 /// Fetch and rasterize one image asynchronously. full selects the larger hover
 /// render; epoch and modified are echoed so the frontend can reject stale results.
-/// None means unavailable; capacity-related retries are handled by the coordinator.
+/// None means unavailable. A browser-level failure (for example the page navigated
+/// while the image was loading) is reported as retryable rather than unavailable.
 pub fn load(
     view: &wry::WebView,
     session: &service::Session,
@@ -67,6 +68,7 @@ pub fn load(
     }})()"#
     );
     service::evaluate_json(view, script, move |result| {
+        let interrupted = result.is_err();
         let data = result
             .ok()
             .and_then(|v| v.as_str().map(str::to_owned))
@@ -74,7 +76,14 @@ pub fn load(
                 s.starts_with("data:image/png;base64,")
                     && s.len() < if full { 24000000 } else { 131072 }
             });
-        let _ = proxy.send_event(AppEvent::PreviewResult(epoch, id, modified, data, full));
+        let _ = proxy.send_event(AppEvent::PreviewResult(
+            epoch,
+            id,
+            modified,
+            data,
+            full,
+            interrupted,
+        ));
     })
 }
 

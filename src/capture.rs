@@ -51,9 +51,6 @@ pub fn install(
                     last_epoch.set(epoch.get());
                     count.set(0);
                 }
-                if flight.get() >= 3 {
-                    return Ok(());
-                }
                 let Some(args) = args else {
                     return Ok(());
                 };
@@ -104,8 +101,9 @@ pub fn install(
                         account,
                     }));
                 }
-                // Session discovery above stays active even when diagnostic inspection is off.
-                if !enabled.get() || count.get() >= schema::LIMIT {
+                // Session discovery above stays active even when diagnostic inspection is off
+                // or its concurrent body reads are saturated.
+                if !enabled.get() || count.get() >= schema::LIMIT || flight.get() >= 3 {
                     return Ok(());
                 }
                 let response = args.Response()?;

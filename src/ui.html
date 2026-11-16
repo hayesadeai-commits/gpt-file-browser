@@ -1,33 +1,171 @@
-<!-- Trusted local shell. Rust substitutes the inventory and thumbnail scripts below.
+<!-- Trusted local shell. Rust substitutes the stylesheet and scripts below.
      Keep remote pages in the separate browser WebView: this document owns native IPC.
      CSP allows bundled inline code/styles and PNG data URLs, with no remote resources. -->
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:"><title>GPT File Browser</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<title>GPT File Browser</title>
 <style>
-:root{color-scheme:dark;font:14px 'Segoe UI',sans-serif;color:#dae3e8;background:#10171c}*{box-sizing:border-box}body{margin:0}button{font:inherit;cursor:pointer;border:1px solid #34444c;background:#24323a;color:#eaf1f4;border-radius:7px;padding:10px 14px}button:hover{background:#344850}button:focus-visible{outline:2px solid #60dfc3;outline-offset:3px}button.primary{background:#77dfc5;color:#10342d;border:0;font-weight:650}button:disabled{opacity:.4;cursor:default}header{height:80px;border-bottom:1px solid #2a373e;display:flex;align-items:center;padding:0 24px;gap:14px}header strong{font-size:23px;letter-spacing:-.5px}header .badge{font-size:11px;letter-spacing:1.2px;background:#213d36;color:#a2e9d7;padding:6px 9px;border-radius:5px}header .right{margin-left:auto;color:#8daba8;font-size:12px}aside{position:fixed;left:0;top:80px;bottom:0;width:280px;padding:24px 20px;border-right:1px solid #2a373e;display:flex;flex-direction:column;gap:10px}aside button{text-align:left;width:100%;border-color:transparent;background:transparent}aside button.active{background:#243d38;color:#a1f2da}aside .label{font-size:10px;color:#7c939f;letter-spacing:1.8px;margin:8px 12px}aside .small{margin-top:24px;color:#91a3ad;font-size:12px;line-height:1.7;padding:0 10px}aside .foot{margin-top:auto;font-size:11px;color:#77909a;padding:10px}main{position:fixed;left:300px;right:20px;top:100px;bottom:20px;overflow:auto}.eyebrow{font-size:11px;letter-spacing:1.6px;color:#7bd9c2}h1{font-size:36px;font-weight:600;letter-spacing:-1px;margin:14px 0}p{line-height:1.7;color:#9fb0bb;max-width:680px}.hero{padding:28px 30px}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:30px 0}.card{background:#19242b;border:1px solid #2a3b44;padding:20px;border-radius:10px}.num{color:#74dfc1;font-size:12px;margin-bottom:15px}.card h3{font-size:15px;margin:0 0 8px}.card p{font-size:12px;margin:0}.notice{border-left:3px solid #b9a879;padding:12px 17px;background:#242720;color:#c7c5b1;font-size:12px;line-height:1.7}.bottom{margin-top:24px;display:flex;align-items:center;gap:16px}.muted{color:#7e929c;font-size:12px}#status{position:fixed;left:20px;bottom:60px;width:240px;color:#a9c5ca;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:20px;flex-wrap:wrap}.toolbar label{display:flex;align-items:center;gap:8px;margin-right:auto}input{accent-color:#77dfc5}.evidence-layout{display:grid;grid-template-columns:minmax(200px,35%) 1fr;gap:16px;height:calc(100% - 160px)}#list{overflow:auto}#list button{width:100%;margin-bottom:6px;text-align:left;font:12px Consolas,monospace;overflow-wrap:anywhere}pre{margin:0;background:#0b1115;border:1px solid #293942;border-radius:8px;padding:18px;overflow:auto;color:#adc9c8;font:12px/1.6 Consolas,monospace;white-space:pre-wrap}#evidence{height:100%;padding:14px}#browser-note{padding:40px}.hidden{display:none!important}
-</style></head><body>
-<header><span aria-hidden="true" style="display:flex"><svg width="24" height="24" viewBox="0 0 64 64"><path d="M9 2h16q6 0 6 9h24q7 0 7 8v36H2V9q0-7 7-7" fill="#59c29a" stroke="#1e6d5b" stroke-width="2"/><rect x="12" y="7" width="42" height="29" rx="4" fill="#f8fae6"/><path d="M18 13h26" stroke="#9ac0a5" stroke-width="2"/><rect x="2" y="19" width="60" height="43" rx="8" fill="#8be7c2" stroke="#1b6353" stroke-width="2"/><path d="M8 22h47" stroke="#caffe4" stroke-width="2" stroke-linecap="round"/><g fill="#16423b"><ellipse cx="22" cy="37" rx="3" ry="3.8"/><ellipse cx="42" cy="37" rx="3" ry="3.8"/></g><g fill="#fafff5"><circle cx="21" cy="36" r="1"/><circle cx="41" cy="36" r="1"/></g><g fill="#f59c9e"><ellipse cx="13" cy="44" rx="4.5" ry="2.5"/><ellipse cx="51" cy="44" rx="4.5" ry="2.5"/></g><path d="M26 43q6 8 12 0" fill="none" stroke="#16423b" stroke-width="2" stroke-linecap="round"/><path d="m57 1 2 4 3 2-3 2-2 4-2-4-3-2 3-2z" fill="#ffd874"/></svg></span><strong>GPT File Browser</strong><span class="badge">ACCESS CHECK</span><span class="right">Rust desktop · Private browser profile</span></header>
-<aside><div class="label">WORKSPACE</div><button id="nav-overview" class="active" onclick="page('overview')">◫ &nbsp; Get started</button><button id="nav-browser" onclick="page('browser')">◎ &nbsp; ChatGPT browser</button><button id="nav-evidence" onclick="page('evidence')">≡ &nbsp; Access evidence <span id="count"></span></button><div class="label" style="margin-top:20px">BROWSER</div><button onclick="navigate('home')">Open ChatGPT</button><button onclick="navigate('space')">Open Space</button><button onclick="send('refresh')">Refresh page</button><div class="small">Your existing Chrome profile stays separate. Sign in directly on ChatGPT’s page.</div><div id="status" role="status">Ready to check access.</div><div class="foot">Full inventory & bulk Trash: pending access verification</div></aside>
-<main><section id="overview" class="hero"><div class="eyebrow">FIRST, VERIFY ACCESS</div><h1>A clearer view of your storage.</h1><p>This first build checks that a desktop app can sign in and observe the file data ChatGPT provides. Once access is verified, the next step is sorting the complete collection and managing selected files.</p><div class="cards"><div class="card"><div class="num">01 / CONNECT</div><h3>Sign in to ChatGPT</h3><p>Use the built-in browser. Your session stays in this app’s own profile.</p></div><div class="card"><div class="num">02 / INSPECT</div><h3>Browse your Library</h3><p>Enable inspection, then open Space, a folder, and more items.</p></div><div class="card"><div class="num">03 / REVIEW</div><h3>Check the data structure</h3><p>Review field names and types before building the full inventory.</p></div></div><div class="notice">Google may reject sign-in inside an embedded browser. If that happens, stop and report the message. This build does not bypass sign-in restrictions.</div><div class="bottom"><button class="primary" onclick="page('browser')">Open ChatGPT →</button><span class="muted">No file downloads or automated deletion</span></div><p style="font-size:12px;margin-top:28px">This is the access-check prototype, not the finished file manager. ChatGPT’s own page remains interactive, including its native file actions.</p></section>
-<section id="browser-note" class="hidden"><p>Opening the dedicated browser…</p></section>
-<section id="evidence" class="hidden"><div class="eyebrow">READ-ONLY RESPONSE INSPECTION</div><h1 style="font-size:27px">Access evidence</h1><div class="toolbar"><label><input id="capture" type="checkbox" onchange="send(this.checked?'capture:on':'capture:off')"> Inspect Library responses</label><button id="save" disabled onclick="send('export')">Save schema report</button><button onclick="send('clear')">Clear</button></div><div class="evidence-layout"><div id="list"><p>No responses observed yet. Enable inspection, then browse Space in the ChatGPT view.</p></div><pre id="detail">Reports contain field names, types, and array counts.
+/*STYLES*/
+</style>
+</head>
+<body>
+<!-- Icon sprite: 16px outline glyphs drawn with the current text color. -->
+<svg hidden aria-hidden="true">
+  <symbol id="i-files" viewBox="0 0 16 16"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.8l1.5 1.6h4.7A1.5 1.5 0 0 1 14 6.1v5.4a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.8 4.5h10.4M6.4 4.5V3h3.2v1.5M4.2 4.5l.5 7.9a1.2 1.2 0 0 0 1.2 1.1h4.2a1.2 1.2 0 0 0 1.2-1.1l.5-7.9M6.7 7.2v3.6M9.3 7.2v3.6"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.8"/><path d="M2.2 8h11.6M8 2.2c2.1 2.2 2.1 9.4 0 11.6M8 2.2c-2.1 2.2-2.1 9.4 0 11.6"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 16 16"><path d="M1.8 8.4h2.7l1.6-4.2 3 7.6 1.6-3.4h3.5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.3"/><path d="m10.2 10.2 3.3 3.3"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7M13.3 2.6v2.8h-2.8"/></symbol>
+  <symbol id="i-export" viewBox="0 0 16 16"><path d="M8 2.5v7.6M5 7.3l3 3 3-3M3 13.2h10"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 16 16"><path d="M9.6 3.6 5.2 8l4.4 4.4"/></symbol>
+  <symbol id="i-next" viewBox="0 0 16 16"><path d="M6.4 3.6 10.8 8l-4.4 4.4"/></symbol>
+  <symbol id="i-sort" viewBox="0 0 16 16"><path d="M4.6 6.4 8 9.8l3.4-3.4"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="7" height="7" rx="1.2"/></symbol>
+  <symbol id="i-home" viewBox="0 0 16 16"><path d="M2.6 7.4 8 2.9l5.4 4.5V13h-3.5V9.4H6.1V13H2.6z"/></symbol>
+  <symbol id="i-library" viewBox="0 0 16 16"><path d="M2.8 2.8h4v4h-4zM9.2 2.8h4v4h-4zM2.8 9.2h4v4h-4zM9.2 9.2h4v4h-4z"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 16 16"><path d="M8 2.6 14 13H2zM8 6.6v3M8 11.3v.1"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="m3.4 8.4 3 3 6.2-6.4"/></symbol>
+  <symbol id="i-restore" viewBox="0 0 16 16"><path d="M3.4 6.4h6.1a3.5 3.5 0 0 1 0 7H6.2M5.9 3.9 3.4 6.4l2.5 2.5"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="m4.2 4.2 7.6 7.6M11.8 4.2l-7.6 7.6"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 16 16"><path d="M6.2 4.4 9.8 8l-3.6 3.6"/></symbol>
+  <symbol id="k-image" viewBox="0 0 16 16"><rect x="2.4" y="3" width="11.2" height="10" rx="1.6"/><circle cx="5.9" cy="6.4" r="1"/><path d="m2.8 11.4 3.1-2.9 2.3 2.1 1.9-1.7 3 2.7"/></symbol>
+  <symbol id="k-document" viewBox="0 0 16 16"><path d="M4.4 2.4h4.7l3 3v7.2a1 1 0 0 1-1 1H4.4a1 1 0 0 1-1-1V3.4a1 1 0 0 1 1-1z"/><path d="M9 2.6v2.9h2.9M5.8 8.4h4.4M5.8 10.7h4.4"/></symbol>
+  <symbol id="k-sheet" viewBox="0 0 16 16"><rect x="2.4" y="3" width="11.2" height="10" rx="1.6"/><path d="M2.6 6.4h10.8M2.6 9.7h10.8M6.4 6.5v6.4"/></symbol>
+  <symbol id="k-archive" viewBox="0 0 16 16"><path d="M2.7 5.3 8 2.7l5.3 2.6v5.4L8 13.3l-5.3-2.6z"/><path d="M2.9 5.4 8 7.9l5.1-2.5M8 7.9v5.2"/></symbol>
+  <symbol id="k-video" viewBox="0 0 16 16"><rect x="2.4" y="3.4" width="11.2" height="9.2" rx="1.6"/><path d="M6.9 6.2v3.6L10 8z"/></symbol>
+  <symbol id="k-audio" viewBox="0 0 16 16"><path d="M6.4 11.4V4.2l5.2-1.3v7.1"/><circle cx="4.9" cy="11.4" r="1.5"/><circle cx="10.1" cy="10" r="1.5"/></symbol>
+  <symbol id="k-other" viewBox="0 0 16 16"><path d="M4.4 2.4h4.7l3 3v7.2a1 1 0 0 1-1 1H4.4a1 1 0 0 1-1-1V3.4a1 1 0 0 1 1-1z"/><path d="M9 2.6v2.9h2.9"/></symbol>
+</svg>
 
-Response values, request headers, and query strings are excluded.
+<nav id="sidebar" aria-label="Sections">
+  <div class="nav-title">Library</div>
+  <button type="button" class="nav-item active" id="nav-files"><svg class="icon"><use href="#i-files"/></svg><span>All files</span><span class="nav-count" id="count-files"></span></button>
+  <button type="button" class="nav-item" id="nav-trash"><svg class="icon"><use href="#i-trash"/></svg><span>Trash</span><span class="nav-count" id="count-trash"></span></button>
+  <div class="nav-title">ChatGPT</div>
+  <button type="button" class="nav-item" id="nav-browser"><svg class="icon"><use href="#i-globe"/></svg><span>Browser</span></button>
+  <button type="button" class="nav-item" id="nav-evidence"><svg class="icon"><use href="#i-pulse"/></svg><span>Diagnostics</span><span class="nav-count" id="count"></span></button>
+  <div class="nav-spacer"></div>
+  <div id="usage" hidden>
+    <div class="usage-row"><span>Storage</span><span id="usage-percent"></span></div>
+    <div class="meter"><span id="usage-bar"></span></div>
+    <div id="usage-text"></div>
+  </div>
+  <div id="status" role="status">Ready. Scan to connect to your Library.</div>
+</nav>
 
-Unknown schema keys are redacted.
+<main>
+  <section id="inventory" class="active" aria-labelledby="view-title">
+    <header class="bar">
+      <div class="title"><h1 id="view-title">All files</h1><span id="view-meta" class="meta"></span></div>
+      <span class="grow"></span>
+      <button type="button" class="btn quiet" id="exportcsv" disabled><svg class="icon"><use href="#i-export"/></svg>Export CSV</button>
+      <button type="button" class="btn" id="cancelscan" hidden><svg class="icon"><use href="#i-stop"/></svg>Stop</button>
+      <button type="button" class="btn" id="scanall"><svg class="icon"><use href="#i-refresh"/></svg><span id="scanlabel">Scan all files</span></button>
+    </header>
+    <div class="filters">
+      <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="findfiles" type="search" placeholder="Search file names" aria-label="Search file names" title="Search file names (Ctrl+F)" autocomplete="off" spellcheck="false"></label>
+      <select id="typefilter" aria-label="File type">
+        <option value="all">All types</option>
+        <option value="image">Images</option>
+        <option value="document">Documents</option>
+        <option value="archive">Archives</option>
+        <option value="other">Other</option>
+      </select>
+      <select id="folderfilter" aria-label="Folder"><option value="">All folders</option></select>
+    </div>
+    <div id="notice" class="notice" role="status" hidden><svg class="icon"><use href="#i-alert"/></svg><span id="notice-text"></span></div>
+    <div id="job" class="job" hidden>
+      <div class="job-head">
+        <span class="job-mark" id="job-mark"></span>
+        <span id="job-text"></span>
+        <span class="grow"></span>
+        <button type="button" class="btn small" id="job-stop">Stop</button>
+        <button type="button" class="btn small quiet" id="job-toggle" aria-expanded="false" aria-controls="job-list">Details<svg class="icon"><use href="#i-chevron"/></svg></button>
+        <button type="button" class="btn small quiet square" id="job-dismiss" aria-label="Dismiss results" title="Dismiss results"><svg class="icon"><use href="#i-close"/></svg></button>
+      </div>
+      <div class="progress"><span id="job-bar"></span></div>
+      <div id="job-list" class="job-list" hidden></div>
+    </div>
+    <div id="activity" class="activity" hidden><span></span></div>
+    <div id="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="pick"><input type="checkbox" id="selectfiltered" aria-label="Select all matching files"></th>
+            <th class="name" data-sort="name"><button type="button">Name<svg class="icon sort"><use href="#i-sort"/></svg></button></th>
+            <th class="when" data-sort="modified"><button type="button">Modified<svg class="icon sort"><use href="#i-sort"/></svg></button></th>
+            <th class="size" data-sort="bytes"><button type="button">Size<svg class="icon sort"><use href="#i-sort"/></svg></button></th>
+          </tr>
+        </thead>
+        <tbody id="filebody"></tbody>
+      </table>
+      <div id="empty" class="empty">
+        <svg class="icon" id="empty-icon"><use href="#i-files"/></svg>
+        <strong id="empty-title"></strong>
+        <span id="empty-text"></span>
+        <button type="button" class="btn primary" id="empty-action" hidden></button>
+      </div>
+    </div>
+    <footer class="bar foot">
+      <span id="selectioncount" class="meta">No files selected</span>
+      <button type="button" class="btn small quiet" id="clearselection" title="Clear selection (Esc)" hidden>Clear</button>
+      <button type="button" class="btn small danger-outline" id="review-selection" disabled><svg class="icon"><use id="review-icon" href="#i-trash"/></svg><span id="review-label">Move to Trash…</span></button>
+      <span class="grow"></span>
+      <span id="pageno" class="meta"></span>
+      <button type="button" class="btn small square" id="prevpage" aria-label="Previous page" title="Previous page"><svg class="icon"><use href="#i-prev"/></svg></button>
+      <button type="button" class="btn small square" id="nextpage" aria-label="Next page" title="Next page"><svg class="icon"><use href="#i-next"/></svg></button>
+    </footer>
+  </section>
 
-Only matching ChatGPT metadata paths are inspected. Empty results do not mean your Library is empty.
+  <!-- The native ChatGPT WebView is laid over #browser-host; its rectangle is reported to Rust. -->
+  <section id="browser" aria-label="ChatGPT browser">
+    <header class="bar browser-bar">
+      <button type="button" class="btn small quiet" data-command="home"><svg class="icon"><use href="#i-home"/></svg>ChatGPT</button>
+      <button type="button" class="btn small quiet" data-command="space"><svg class="icon"><use href="#i-library"/></svg>Library</button>
+      <button type="button" class="btn small quiet" data-command="refresh"><svg class="icon"><use href="#i-refresh"/></svg>Reload</button>
+      <span class="grow"></span>
+      <span class="meta">Sign in here. Your session stays in this app’s own profile.</span>
+    </header>
+    <div id="browser-host"></div>
+  </section>
 
-Reports are saved next to the app in reports/.</pre></div></section></main>
+  <section id="evidence" aria-labelledby="evidence-title">
+    <header class="bar">
+      <div class="title"><h1 id="evidence-title">Diagnostics</h1><span class="meta">Read-only response structure, for troubleshooting service changes</span></div>
+      <span class="grow"></span>
+      <label class="switch"><input id="capture" type="checkbox">Inspect Library responses</label>
+      <button type="button" class="btn" id="save" disabled>Save report</button>
+      <button type="button" class="btn quiet" id="clearevidence">Clear</button>
+    </header>
+    <div class="evidence">
+      <div id="list" class="evidence-list"></div>
+      <pre id="detail"></pre>
+    </div>
+  </section>
+</main>
+
+<dialog id="review-dialog" aria-labelledby="review-title">
+  <h2 id="review-title"></h2>
+  <p id="review-total"></p>
+  <div id="review-files"></div>
+  <p id="review-note"></p>
+  <div class="dialog-actions">
+    <button type="button" class="btn" id="review-cancel">Cancel</button>
+    <button type="button" class="btn primary" id="review-confirm"></button>
+  </div>
+</dialog>
+
 <script>
 // Commands are requests, not authority; Rust validates IDs, review nonces, and state.
 function send(command){window.ipc.postMessage(command)}
-// Switch local sections and notify Rust whether its overlaid browser should be visible.
-function page(name){document.querySelectorAll('main>section').forEach(x=>x.classList.add('hidden'));document.getElementById(name==='browser'?'browser-note':name).classList.remove('hidden');document.querySelectorAll('aside button').forEach(x=>x.classList.remove('active'));document.getElementById('nav-'+name).classList.add('active');send(name)}
-function navigate(command){page('browser');send(command)}
-window.showStatus=text=>{document.getElementById('status').textContent=text};
-window.showEvidence=items=>{document.getElementById('count').textContent=items.length?'('+items.length+')':'';document.getElementById('save').disabled=!items.length;const list=document.getElementById('list');list.replaceChildren();if(!items.length){list.textContent='No responses observed yet.';document.getElementById('detail').textContent='Enable inspection and browse Space.';}for(const item of items){const b=document.createElement('button');b.textContent=item.status+' '+item.path;b.onclick=()=>document.getElementById('detail').textContent=item.schema;list.appendChild(b)}};
 /*INVENTORY_SCRIPT*/
 // Smoke tests require this signal, so script initialization errors fail startup validation.
 send('__ready');
-page('inventory');
-</script></body></html>
+</script>
+</body>
+</html>

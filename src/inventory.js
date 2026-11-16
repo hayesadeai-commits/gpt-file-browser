@@ -1,102 +1,753 @@
 /**
- * Trusted local file-browser UI; loaded inline after the base shell in ui.html.
+ * Trusted local file-browser UI; loaded inline by ui.html, before thumbnails.js.
  * Rust owns authentication, authoritative snapshots, review validation, and mutations.
  * This script owns display state and sends only commands/IDs through send().
  * Filenames and other service values enter DOM text nodes, never interpolated HTML.
  *
- * All filtering/sorting uses the complete snapshot; PAGE_SIZE only limits rendered rows.
- * The renderFiles wrapper chain adds action state here, then thumbnails/hover behavior
- * in thumbnails.js. Preserve that load order when splitting or reorganizing scripts.
+ * Files and Trash are separate stores. Rust replaces a store with a full snapshot
+ * (showInventory/showTrash) or patches it (patchView); filtering and sorting always
+ * cover the complete store, and PAGE_SIZE only limits how many rows are drawn.
+ *
+ * The "#region" markers delimit self-contained logic that tests/preflight.cjs runs
+ * directly from this file. Keep each region free of references to later code.
  */
-const invStyle=document.createElement('style');invStyle.textContent=`
-aside{gap:7px;overflow-y:auto}aside .small{display:none}#status{position:static;width:auto;margin-top:auto;padding:10px 4px;max-height:85px;overflow:auto;flex-shrink:0;border-top:1px solid #293b44}aside .foot{margin-top:0;padding:4px}
-#inventory{padding:12px;height:100%;display:flex;flex-direction:column;gap:14px}#inventory h1{font-size:28px;margin:0}.invhead{display:flex;align-items:center;gap:12px}.invhead .actions{margin-left:auto;display:flex;gap:8px}.summary{display:flex;gap:16px;color:#afc3cc;font-size:13px}.summary strong{color:#e4f3f0;font-size:20px;margin-right:5px}.filters{display:flex;gap:10px}.filters input,.filters select{background:#1a272e;color:#dde9ec;border:1px solid #37464e;border-radius:6px;padding:10px;font:inherit}.filters input{flex:1;min-width:100px}.filters select{max-width:210px}#scanstate{font-size:12px;color:#91b7ae;min-height:17px}.tablewrap{overflow:auto;flex:1;border:1px solid #2c3d46;border-radius:8px;min-height:150px}table{width:100%;border-collapse:collapse;font-size:13px}thead{position:sticky;top:0;background:#1b282f;z-index:1}th{text-align:left;font-size:11px;color:#9fb8c3;letter-spacing:.5px}th,td{padding:11px 12px;border-bottom:1px solid #24343c}th button{border:0;background:none;padding:0;font-size:11px;font-weight:600;color:inherit}td.name{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}td.name button{padding:0;border:0;background:transparent;text-align:left;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d7e8ed;font:inherit}td.when{white-space:nowrap;font-size:12px}td.size{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}tbody tr:hover{background:#1a2c33}tbody tr.selected{background:#203d38}.selection{display:flex;align-items:center;gap:12px;font-size:12px;color:#b5cbd3}.selection button{padding:7px 10px}.selection .pagination{margin-left:auto;display:flex;align-items:center;gap:10px}.empty{padding:45px;text-align:center;color:#8da4ae}.error{color:#f5bd9e!important}
-`;document.head.appendChild(invStyle);
-const nav=document.createElement('button');nav.id='nav-inventory';nav.textContent='▦   All files';nav.onclick=()=>page('inventory');document.querySelector('aside').insertBefore(nav,document.getElementById('nav-overview'));
-document.querySelector('main').insertAdjacentHTML('beforeend',`<section id="inventory" class="hidden"><div class="invhead"><h1>Your cloud files</h1><div class="actions"><button id="exportcsv" disabled onclick="send('export_csv')">Export CSV</button><button id="cancelscan" class="hidden" onclick="send('cancel')">Stop</button><button id="scanall" class="primary" onclick="startScan()">Scan all files</button></div></div><div class="summary"><span><strong id="filecount">—</strong>files</span><span><strong id="sizecount">—</strong>listed size</span><span><strong id="foldercount">—</strong>folders</span></div><div id="scanstate" role="status">Scan your Library to sort and search across the complete collection.</div><div class="filters"><input id="findfiles" placeholder="Search all filenames…" aria-label="Search all filenames"><select id="typefilter" aria-label="File type"><option value="all">All types</option><option value="archive">Archives</option><option value="image">Images</option><option value="document">Documents</option><option value="other">Other files</option></select><select id="folderfilter" aria-label="Folder"><option value="">All folders</option></select></div><div class="tablewrap"><table><thead><tr><th style="width:35px"><input type="checkbox" id="selectfiltered" aria-label="Select all filtered files"></th><th><button onclick="sortBy('name')">NAME <span id="sort-name"></span></button></th><th><button onclick="sortBy('modified')">MODIFIED <span id="sort-modified"></span></button></th><th style="text-align:right"><button onclick="sortBy('bytes')">SIZE <span id="sort-bytes">↓</span></button></th></tr></thead><tbody id="filebody"><tr><td colspan="4" class="empty">Your files will appear here after a scan.</td></tr></tbody></table></div><div class="selection"><span id="selectioncount">No files selected</span><button onclick="selected.clear();selectionAnchor=null;renderFiles()">Clear selection</button><div class="pagination"><button id="prevpage" onclick="tablePage--;renderFiles()">Previous</button><span id="pageno">Page 1</span><button id="nextpage" onclick="tablePage++;renderFiles()">Next</button></div></div></section>`);
-/** View state is local to the table; selection stores stable IDs rather than row indexes. */
-let inventoryState={rows:[],complete:false,busy:false},selected=new Set(),sortKey='bytes',sortDirection=-1,tablePage=0;
+const $ = id => document.getElementById(id);
+
+// #region format
+/** Format numeric bytes for display only. Sorting and selection totals retain numeric values. */
+function bytesText(n) {
+  if (n == null) return 'Unknown';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let k = 0;
+  // Step up a unit at 1,000 so a value never needs four digits (0.99 GB, not 1,016 MB).
+  while (n >= 1000 && k < units.length - 1) { n /= 1024; k++; }
+  // Three significant digits: 4.82 MB, 96.3 GB, 461 MB. Whole bytes are never fractional.
+  const digits = k === 0 || n >= 100 ? 0 : n >= 10 ? 1 : 2;
+  return n.toLocaleString(undefined, {maximumFractionDigits: digits}) + ' ' + units[k];
+}
+/** Classify for UI filtering; extension fallback supports legacy images with generic MIME metadata. */
+function fileType(f) {
+  if (f.mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|ico|svg|avif)$/i.test(f.name)) return 'image';
+  if (/\.(zip|xz|gz|tar|7z|rar|bz2|zst)$/i.test(f.name)) return 'archive';
+  if (/\.(pdf|docx?|xlsx?|csv|txt|md|pptx?|json|html?)$/i.test(f.name) || f.mime.startsWith('text/')) return 'document';
+  return 'other';
+}
+/** Finer grouping for the name-column glyph only; the type filter keeps fileType's groups. */
+function fileKind(f) {
+  if (f.mime.startsWith('video/') || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(f.name)) return 'video';
+  if (f.mime.startsWith('audio/') || /\.(mp3|wav|m4a|flac|ogg|aac)$/i.test(f.name)) return 'audio';
+  if (/\.(csv|tsv|xlsx?)$/i.test(f.name)) return 'sheet';
+  return fileType(f);
+}
+/** Derive the values that filtering and sorting read for every row, once per row. */
+function prepare(row) {
+  row._name = row.name.toLowerCase();
+  const time = row.modified ? Date.parse(row.modified) : NaN;
+  row._time = Number.isFinite(time) ? time : null;
+  row._type = row.folder ? 'folder' : fileType(row);
+  return row;
+}
+// #endregion format
+
 /** Changing the visible page must not limit selection, filtering, or sorting to that page. */
-const PAGE_SIZE=100;
+const PAGE_SIZE = 100;
+const makeStore = () => ({rows: new Map(), version: 0, busy: false, complete: false, error: null, pages: 0});
+/** Files and Trash keep separate snapshots; `version` changes whenever a store's rows change. */
+const stores = {files: makeStore(), trash: makeStore()};
+/** View state is shared by both stores; selection holds stable IDs rather than row indexes. */
+let viewMode = 'files', selected = new Set(), sortKey = 'bytes', sortDirection = -1, tablePage = 0;
+let jobActive = false;
+
+// #region queue
 // Confirmed reservations are presentation-only: native snapshots retain these rows
 // until readback verifies a change. Stopped/skipped work can therefore reappear.
-let reservedIds=new Set(),queuedBatchCount=0,queuedFileCount=0;
-window.showQueue=data=>{reservedIds=new Set(data.ids);queuedBatchCount=data.batches;queuedFileCount=data.files;for(const id of reservedIds)selected.delete(id);if(reservedIds.has(selectionAnchor))selectionAnchor=null;renderFiles();};
-let selectionAnchor=null;
+let reservedIds = new Set(), reservedVersion = 0, queuedBatchCount = 0, queuedFileCount = 0;
+window.showQueue = data => {
+  reservedIds = new Set(data.ids);
+  reservedVersion++;
+  queuedBatchCount = data.batches;
+  queuedFileCount = data.files;
+  for (const id of reservedIds) selected.delete(id);
+  if (reservedIds.has(selectionAnchor)) selectionAnchor = null;
+  renderFiles();
+};
+// #endregion queue
+
+// #region selection
+let selectionAnchor = null;
 /** Apply Shift-click against the full filtered/sorted ordering, skipping quarantined rows.
  * Keep the original anchor through repeated Shift-clicks; a missing anchor starts a new range. */
-function selectRange(files,id,checked,shift){const index=files.findIndex(f=>f.id===id),anchor=files.findIndex(f=>f.id===selectionAnchor);if(index<0)return;if(shift&&anchor>=0){for(const f of files.slice(Math.min(index,anchor),Math.max(index,anchor)+1)){if(f.action_blocked)continue;if(checked)selected.add(f.id);else selected.delete(f.id);}}else{if(!files[index].action_blocked){if(checked)selected.add(id);else selected.delete(id);}selectionAnchor=id;}}
+function selectRange(files, id, checked, shift) {
+  const index = files.findIndex(f => f.id === id), anchor = files.findIndex(f => f.id === selectionAnchor);
+  if (index < 0) return;
+  if (shift && anchor >= 0) {
+    for (const f of files.slice(Math.min(index, anchor), Math.max(index, anchor) + 1)) {
+      if (f.action_blocked) continue;
+      if (checked) selected.add(f.id); else selected.delete(f.id);
+    }
+  } else {
+    if (!files[index].action_blocked) {
+      if (checked) selected.add(id); else selected.delete(id);
+    }
+    selectionAnchor = id;
+  }
+}
+// #endregion selection
 
-/** Format numeric bytes for display only. Sorting and selection totals retain numeric values. */
-function bytesText(n){if(n==null)return 'Unknown';const units=['B','KB','MB','GB','TB'];let k=0;while(n>=1024&&k<4){n/=1024;k++}return n.toLocaleString(undefined,{maximumFractionDigits:k?2:0})+' '+units[k]}
-/** Classify for UI filtering; extension fallback supports legacy images with generic MIME metadata. */
-function fileType(f){if(f.mime.startsWith('image/')||/\.(png|jpe?g|gif|webp|bmp|ico|svg|avif)$/i.test(f.name))return 'image';if(/\.(zip|xz|gz|tar|7z|rar|bz2|zst)$/i.test(f.name))return 'archive';if(/\.(pdf|docx?|xlsx?|csv|txt|md|pptx?|json|html?)$/i.test(f.name)||f.mime.startsWith('text/'))return 'document';return 'other'}
-/** Initial files-view scan handler; replaced below once the shared Trash view is initialized. */
-function startScan(){selected.clear();selectionAnchor=null;tablePage=0;send('scan')}
-/** Toggle direction for the current column and return to page one without losing selection. */
-function sortBy(key){sortDirection=sortKey===key?-sortDirection:(key==='name'?1:-1);sortKey=key;tablePage=0;renderFiles()}
-/** Filter the entire snapshot, follow ancestor links for folder descendants, then sort.
- * The visited-parent set prevents cyclic folder metadata from hanging the UI.
- * Unknown values stay last and stable ID breaks ties so pagination remains deterministic. */
-function filteredFiles(){const q=document.getElementById('findfiles').value.toLowerCase(),type=document.getElementById('typefilter').value,folder=document.getElementById('folderfilter').value;const byId=new Map(inventoryState.rows.map(r=>[r.id,r]));
-// Folder descendants are resolved locally; filtering does not issue more network requests.
-return inventoryState.rows.filter(f=>{if(reservedIds.has(f.id)||f.folder||!f.name.toLowerCase().includes(q)||(type!=='all'&&fileType(f)!==type))return false;if(!folder)return true;let p=f.parent,seen=new Set();while(p&&!seen.has(p)){if(p===folder)return true;seen.add(p);p=byId.get(p)?.parent}return false}).sort((a,b)=>{let av=a[sortKey],bv=b[sortKey];if(av==null)return bv==null?a.id.localeCompare(b.id):1;if(bv==null)return -1;let result=sortKey==='bytes'?av-bv:sortKey==='modified'?new Date(av).getTime()-new Date(bv).getTime():av.localeCompare(bv,undefined,{numeric:true,sensitivity:'base'});return result*sortDirection||a.id.localeCompare(b.id)})}
-/** Render only the current page, but compute selection totals and select-all state globally.
- * Checkbox/filename Shift-clicks share the same range selector. Rebuilding DOM nodes is
- * intentional; preview decorators reattach themselves after this base renderer completes. */
-function renderFiles(){const files=filteredFiles(),pages=Math.max(1,Math.ceil(files.length/PAGE_SIZE));tablePage=Math.max(0,Math.min(tablePage,pages-1));const body=document.getElementById('filebody');body.replaceChildren();for(const f of files.slice(tablePage*PAGE_SIZE,(tablePage+1)*PAGE_SIZE)){const tr=document.createElement('tr');tr.classList.toggle('selected',selected.has(f.id));const c=document.createElement('td'),check=document.createElement('input');check.type='checkbox';check.checked=selected.has(f.id);check.setAttribute('aria-label','Select '+f.name);check.disabled=!!f.action_blocked;check.onclick=e=>{selectRange(filteredFiles(),f.id,check.checked,e.shiftKey);renderFiles()};c.append(check);const name=document.createElement('td');name.className='name';const open=document.createElement('button');open.textContent=f.name+(f.action_blocked?' (refresh to verify)':'');open.title=f.action_blocked?'Refresh to verify this file before changing it again.':f.name;open.onclick=e=>{if(e.shiftKey){selectRange(filteredFiles(),f.id,true,true);renderFiles()}else send('open:'+f.id)};if(viewMode==='trash'){open.disabled=true;open.title='Restore this file to open it in ChatGPT.';}name.append(open);const date=document.createElement('td');date.className='when';date.textContent=f.modified?new Date(f.modified).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}):'Unknown';date.title=f.modified||'';const size=document.createElement('td');size.className='size';size.textContent=bytesText(f.bytes);size.title=f.bytes==null?'Size not supplied':f.bytes.toLocaleString()+' bytes';tr.append(c,name,date,size);body.append(tr)}if(!files.length){const row=body.insertRow();const cell=row.insertCell();cell.colSpan=4;cell.className='empty';cell.textContent=inventoryState.busy?'Scanning your Library…':inventoryState.rows.length?'No files match your filters.':'Scan your Library to load files.'}document.getElementById('pageno').textContent=`${files.length.toLocaleString()} matches · ${tablePage+1} / ${pages}`;document.getElementById('prevpage').disabled=tablePage===0;document.getElementById('nextpage').disabled=tablePage+1>=pages;const picked=inventoryState.rows.filter(f=>selected.has(f.id));const sum=picked.reduce((s,f)=>s+(f.bytes||0),0),unknown=picked.filter(f=>f.bytes==null).length;document.getElementById('selectioncount').textContent=picked.length?`${picked.length} selected · ${bytesText(sum)}${unknown?' + '+unknown+' unknown sizes':''}`:'No files selected';// Blocked rows are visible for diagnosis but never included by select-all.
-const selectable=files.filter(f=>!f.action_blocked);const all=document.getElementById('selectfiltered');all.checked=selectable.length>0&&selectable.every(f=>selected.has(f.id));all.indeterminate=!all.checked&&files.some(f=>selected.has(f.id));all.disabled=!selectable.length;for(const key of ['name','modified','bytes'])document.getElementById('sort-'+key).textContent=sortKey===key?(sortDirection===1?'↑':'↓'):''}
-/** Header selection spans all matching pages. A blocked file cannot be reselected until refresh. */
-document.getElementById('selectfiltered').onchange=e=>{selectionAnchor=null;for(const f of filteredFiles()){if(f.action_blocked)continue;if(e.target.checked)selected.add(f.id);else selected.delete(f.id)}renderFiles()};for(const id of ['findfiles','typefilter','folderfilter'])document.getElementById(id).addEventListener('input',()=>{tablePage=0;renderFiles()});
-/** Reconcile a native snapshot, drop stale/blocked selections, rebuild folders, and render.
- * This base callback is wrapped below to keep Files and Trash snapshots independent. */
-window.showInventory=data=>{inventoryState=data;for(const id of selected)if(!data.rows.some(f=>f.id===id&&!f.action_blocked))selected.delete(id);const files=data.rows.filter(f=>!f.folder),folders=data.rows.filter(f=>f.folder);document.getElementById('filecount').textContent=files.length.toLocaleString();document.getElementById('sizecount').textContent=bytesText(files.reduce((s,f)=>s+(f.bytes||0),0));document.getElementById('foldercount').textContent=folders.length;const state=document.getElementById('scanstate');state.classList.toggle('error',!!data.error);state.textContent=data.error|| (data.busy?`Scanning all pages and folders… ${data.pages} pages read`:(data.complete?`Scan complete · ${data.pages} pages · sorting and search cover all listed files`:'Inventory has not been completed.'));document.getElementById('scanall').disabled=data.busy;document.getElementById('scanall').textContent=data.rows.length?'Refresh all files':'Scan all files';document.getElementById('cancelscan').classList.toggle('hidden',!data.busy);document.getElementById('exportcsv').disabled=!files.length;const select=document.getElementById('folderfilter'),old=select.value;select.replaceChildren(new Option('All folders',''));folders.sort((a,b)=>a.name.localeCompare(b.name)).forEach(f=>select.add(new Option(f.name,f.id)));select.value=old;renderFiles()};
-window.selectBrowser=()=>page('browser');
+// #region filter
+const nameOrder = new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'});
+const idOrder = (a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+/** Unknown values stay last and the stable ID breaks ties, so pagination is deterministic. */
+function compareRows(a, b) {
+  const av = sortKey === 'bytes' ? a.bytes : sortKey === 'modified' ? a._time : a.name;
+  const bv = sortKey === 'bytes' ? b.bytes : sortKey === 'modified' ? b._time : b.name;
+  if (av == null) return bv == null ? idOrder(a, b) : 1;
+  if (bv == null) return -1;
+  const result = sortKey === 'name' ? nameOrder.compare(av, bv) : av - bv;
+  return result * sortDirection || idOrder(a, b);
+}
+/** The chosen folder plus every folder beneath it. Visiting each ID once keeps cyclic
+ * folder metadata from hanging the UI. Resolved locally; no network request is issued. */
+function folderScope(store, rootId) {
+  const children = new Map();
+  for (const row of store.rows.values()) {
+    if (!row.folder) continue;
+    if (!children.has(row.parent)) children.set(row.parent, []);
+    children.get(row.parent).push(row.id);
+  }
+  const scope = new Set([rootId]), pending = [rootId];
+  while (pending.length) {
+    for (const child of children.get(pending.pop()) || []) {
+      if (!scope.has(child)) { scope.add(child); pending.push(child); }
+    }
+  }
+  return scope;
+}
+let filterCache = {key: null, files: []};
+/** Filter and sort the entire current store. The result is reused until the rows,
+ * reservations, filters, or sort order change, so selection clicks never re-sort. */
+function filteredFiles() {
+  const store = stores[viewMode];
+  const query = $('findfiles').value.toLowerCase(), type = $('typefilter').value;
+  const folder = viewMode === 'files' ? $('folderfilter').value : '';
+  const key = [viewMode, store.version, reservedVersion, sortKey, sortDirection, type, folder, query].join('\u0001');
+  if (filterCache.key === key) return filterCache.files;
+  const scope = folder ? folderScope(store, folder) : null;
+  const files = [];
+  for (const f of store.rows.values()) {
+    if (f.folder || reservedIds.has(f.id)) continue;
+    if (query && !f._name.includes(query)) continue;
+    if (type !== 'all' && f._type !== type) continue;
+    if (scope && !scope.has(f.parent)) continue;
+    files.push(f);
+  }
+  files.sort(compareRows);
+  filterCache = {key, files};
+  return files;
+}
+// #endregion filter
 
-// File and Trash views share global sorting and selection, with separate snapshots.
-/** Files and Trash share controls, but keep separate snapshots. Switching clears selection
- * so a selection made in one context cannot accidentally become an action in the other. */
-let viewMode='files',filesState=inventoryState,trashState={rows:[],complete:false,busy:false,pages:0},jobActive=false;
-const trashNav=document.createElement('button');trashNav.id='nav-trash';trashNav.textContent='♲   Trash';trashNav.onclick=()=>switchView('trash');document.querySelector('aside').insertBefore(trashNav,document.getElementById('nav-overview'));nav.onclick=()=>switchView('files');
-/** Request a review of IDs still present in the current view. Rust repeats all safety checks. */
-const reviewButton=document.createElement('button');reviewButton.id='review-selection';reviewButton.textContent='Review move to Trash';reviewButton.style.borderColor='#956854';reviewButton.onclick=()=>{const available=new Set(inventoryState.rows.filter(f=>!reservedIds.has(f.id)).map(f=>f.id));send('review:'+JSON.stringify({action:viewMode==='trash'?'restore':'trash',ids:[...selected].filter(id=>available.has(id))}))};document.querySelector('.selection').insertBefore(reviewButton,document.querySelector('.pagination'));
-document.body.insertAdjacentHTML('beforeend',`<dialog id="review-dialog" style="background:#17252d;color:#e4eeee;border:1px solid #46606c;border-radius:12px;width:620px;max-width:90vw;padding:25px"><h2 id="review-title"></h2><p id="review-total"></p><p id="review-note" style="font-size:12px"></p><div id="review-files" style="max-height:300px;overflow:auto;border:1px solid #354750;padding:12px;margin-bottom:20px"></div><div style="display:flex;gap:12px;justify-content:flex-end"><button id="review-cancel">Cancel</button><button id="review-confirm" class="primary"></button></div></dialog>`);
-/** Consume the review nonce exactly once on confirmation; cancel and Escape invalidate it.
- * The nonce identifies the reviewed selection, not an arbitrary client-provided file list. */
-let reviewNonce=null;const dialog=document.getElementById('review-dialog');dialog.addEventListener('cancel',()=>{send('cancel_review');reviewNonce=null});document.getElementById('review-cancel').onclick=()=>{send('cancel_review');reviewNonce=null;dialog.close()};document.getElementById('review-confirm').onclick=()=>{if(reviewNonce!=null){const n=reviewNonce;reviewNonce=null;dialog.close();send('confirm:'+n)}};
-/** Show the native-approved selection using textContent. Default focus stays on Cancel. */
-window.showReview=r=>{reviewNonce=r.nonce;document.getElementById('review-title').textContent=jobActive?(r.action==='trash'?'Queue selected files for Trash?':'Queue selected files for restore?'):(r.action==='trash'?'Move selected files to Trash?':'Restore selected files?');const total=r.files.reduce((s,f)=>s+(f.bytes||0),0);document.getElementById('review-total').textContent=r.files.length+' files · '+bytesText(total);document.getElementById('review-note').textContent=r.action==='trash'?'These files will move to ChatGPT Trash. ChatGPT schedules trashed files for permanent removal after 30 days. This app does not permanently delete files.':'These files will return to your Library. Restoring files may be rejected if storage is full.';const list=document.getElementById('review-files');list.replaceChildren();for(const f of r.files){const row=document.createElement('div');row.style.padding='6px 0';row.textContent=f.name+' — '+bytesText(f.bytes);list.append(row)}document.getElementById('review-confirm').textContent=(jobActive?'Add to queue':r.action==='trash'?'Move to Trash':'Restore')+' ('+r.files.length+')';dialog.showModal();document.getElementById('review-cancel').focus()};
-/** Keep batch history available without automatically expanding it over the file table. */
-const jobBox=document.createElement('details');jobBox.id='job-results';jobBox.style.cssText='max-height:190px;overflow:auto;border:1px solid #36505b;border-radius:6px;padding:8px;font-size:12px';jobBox.classList.add('hidden');document.getElementById('inventory').insertBefore(jobBox,document.querySelector('.filters'));
+/** thumbnails.js registers here instead of wrapping renderFiles: `before` runs ahead of
+ * a table rebuild, `row` receives each new thumbnail box, `after` runs once rows exist. */
+const renderHooks = {before: [], row: [], after: []};
+
+/** Reference a glyph from the sprite in ui.html: "i" for interface icons, "k" for file kinds. */
+const icon = (name, set = 'i') => {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'icon');
+  svg.append(document.createElementNS('http://www.w3.org/2000/svg', 'use'));
+  svg.firstChild.setAttribute('href', `#${set}-${name}`);
+  return svg;
+};
+const whenText = f => f._time == null ? 'Unknown' : new Date(f._time).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'});
+
+/** One table row. Text enters through textContent; events are delegated to the tbody. */
+function buildRow(f) {
+  const tr = document.createElement('tr');
+  tr.dataset.id = f.id;
+  const pick = tr.insertCell(), check = document.createElement('input');
+  pick.className = 'pick';
+  check.type = 'checkbox';
+  check.disabled = !!f.action_blocked;
+  check.setAttribute('aria-label', 'Select ' + f.name);
+  pick.append(check);
+
+  const name = tr.insertCell(), link = document.createElement('button');
+  const visual = document.createElement('span'), label = document.createElement('span');
+  name.className = 'name';
+  link.type = 'button';
+  link.className = 'file-link';
+  const kind = fileKind(f);
+  visual.className = 'file-visual ' + kind;
+  visual.append(icon(kind, 'k'));
+  label.className = 'file-label';
+  label.textContent = f.name;
+  link.append(visual, label);
+  link.title = viewMode === 'trash' ? 'Restore this file to open it in ChatGPT.' : f.name;
+  if (f.action_blocked) {
+    const flag = document.createElement('span');
+    flag.className = 'file-flag';
+    flag.textContent = 'Needs refresh';
+    link.append(flag);
+    link.title = 'Refresh to verify this file before changing it again.';
+  }
+  name.append(link);
+
+  const when = tr.insertCell(), size = tr.insertCell();
+  when.className = f._time == null ? 'when unknown' : 'when';
+  when.textContent = whenText(f);
+  when.title = f.modified || '';
+  size.className = f.bytes == null ? 'size unknown' : 'size';
+  size.textContent = bytesText(f.bytes);
+  size.title = f.bytes == null ? 'Size not supplied' : f.bytes.toLocaleString() + ' bytes';
+  for (const hook of renderHooks.row) hook(visual, f);
+  return tr;
+}
+
+/** What the table currently shows, so an update that leaves the visible page untouched
+ * (a change elsewhere in the collection, or in the other view) does not rebuild it. */
+let drawn = {state: '', rows: []};
+/** Draw the visible page. Selection totals and select-all state are computed over the
+ * whole filtered collection in paintSelection, never just the rows drawn here. */
+function renderFiles() {
+  const store = stores[viewMode], files = filteredFiles();
+  const pages = Math.max(1, Math.ceil(files.length / PAGE_SIZE));
+  tablePage = Math.max(0, Math.min(tablePage, pages - 1));
+  const first = tablePage * PAGE_SIZE, visible = files.slice(first, first + PAGE_SIZE);
+  // Thumbnails start loading once a listing completes, so that state is part of the picture.
+  const state = `${viewMode}|${store.busy}|${store.complete}`;
+  const unchanged = drawn.state === state && drawn.rows.length === visible.length
+    && visible.every((f, i) => f === drawn.rows[i]);
+  if (!unchanged) {
+    for (const hook of renderHooks.before) hook();
+    const rows = document.createDocumentFragment();
+    for (const f of visible) rows.append(buildRow(f));
+    $('filebody').replaceChildren(rows);
+    drawn = {state, rows: visible};
+    for (const hook of renderHooks.after) hook();
+  }
+
+  $('empty').hidden = files.length > 0;
+  if (!files.length) {
+    const listed = store.rows.size > 0, trash = viewMode === 'trash';
+    $('empty-title').textContent = store.busy ? (trash ? 'Loading Trash…' : 'Scanning your Library…')
+      : listed ? 'No matching files'
+      : trash ? (store.complete ? 'Trash is empty' : 'Trash is not loaded')
+      : 'No files listed yet';
+    $('empty-text').textContent = store.busy ? 'Files appear here as they are found.'
+      : listed ? 'Try a different search or filter.'
+      : trash ? (store.complete ? 'Files you move to Trash appear here.' : 'Scan your Library first, then open Trash again.')
+      : 'Scan your Library to list, sort, and search every file.';
+    // Offer the one useful next step where the eye already is: undo the filters that
+    // hide everything, or start the listing that has not run yet.
+    const action = $('empty-action');
+    action.hidden = store.busy || (listed ? false : store.complete || jobActive);
+    action.textContent = listed ? 'Clear filters' : trash ? 'Load Trash' : 'Scan all files';
+    action.className = listed ? 'btn' : 'btn primary';
+  }
+  $('pageno').textContent = files.length
+    ? `${(first + 1).toLocaleString()}–${(first + visible.length).toLocaleString()} of ${files.length.toLocaleString()}`
+    : '';
+  $('prevpage').disabled = tablePage === 0;
+  $('nextpage').disabled = tablePage + 1 >= pages;
+  for (const th of document.querySelectorAll('th[data-sort]')) {
+    if (th.dataset.sort === sortKey) th.setAttribute('aria-sort', sortDirection === 1 ? 'ascending' : 'descending');
+    else th.removeAttribute('aria-sort');
+  }
+  paintSummary();
+  paintSelection();
+}
+
+/** Title, counts, listing state, and the folder filter for the current view. */
+function paintSummary() {
+  const store = stores[viewMode], trash = viewMode === 'trash';
+  let files = 0, folders = 0, bytes = 0;
+  for (const row of store.rows.values()) {
+    if (row.folder) folders++; else { files++; bytes += row.bytes || 0; }
+  }
+  const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`;
+  const parts = [plural(files, 'file'), bytesText(bytes)];
+  if (folders) parts.push(plural(folders, 'folder'));
+  $('inventory').classList.toggle('trash', trash);
+  $('view-title').textContent = trash ? 'Trash' : 'All files';
+  $('view-meta').textContent = store.busy
+    ? (trash ? `Loading… ${plural(files, 'file')}` : `Scanning… ${plural(files, 'file')} · ${plural(store.pages, 'page')}`)
+    : store.rows.size || store.complete ? parts.join(' · ') : '';
+  $('notice').hidden = !store.error;
+  $('notice-text').textContent = store.error || '';
+  $('activity').hidden = !store.busy;
+
+  // Counts stay visible for both views so the sidebar reflects moves between them.
+  // Trash is listed separately, so its count appears only once that listing is complete.
+  for (const [id, view, known] of [
+    ['count-files', stores.files, stores.files.rows.size > 0 || stores.files.complete],
+    ['count-trash', stores.trash, stores.trash.complete],
+  ]) {
+    let n = 0;
+    for (const row of view.rows.values()) if (!row.folder) n++;
+    $(id).textContent = known ? n.toLocaleString() : '';
+  }
+
+  // Rebuild folder options only when the folder set changes; label nested folders by path.
+  const select = $('folderfilter');
+  select.disabled = trash;
+  if (!trash) {
+    const byId = store.rows, list = [];
+    for (const row of byId.values()) {
+      if (!row.folder) continue;
+      const names = [row.name], seen = new Set([row.id]);
+      for (let p = byId.get(row.parent); p && p.folder && !seen.has(p.id); p = byId.get(p.parent)) {
+        names.unshift(p.name);
+        seen.add(p.id);
+      }
+      list.push([row.id, names.join(' / ')]);
+    }
+    list.sort((a, b) => nameOrder.compare(a[1], b[1]));
+    const signature = JSON.stringify(list);
+    if (select.dataset.signature !== signature) {
+      const chosen = select.value;
+      select.dataset.signature = signature;
+      select.replaceChildren(new Option('All folders', ''), ...list.map(([id, path]) => new Option(path, id)));
+      // A folder that no longer exists falls back to the unfiltered list.
+      select.value = list.some(([id]) => id === chosen) ? chosen : '';
+    }
+  }
+  paintJob();
+}
+
+/** Reflect the selection in the drawn rows, the footer, and the select-all box without
+ * rebuilding the table, so thumbnails and scroll position are untouched by a click. */
+function paintSelection() {
+  const store = stores[viewMode];
+  for (const tr of $('filebody').rows) {
+    const on = selected.has(tr.dataset.id);
+    tr.classList.toggle('selected', on);
+    tr.cells[0].firstChild.checked = on;
+  }
+  let count = 0, bytes = 0, unknown = 0;
+  for (const id of selected) {
+    const f = store.rows.get(id);
+    if (!f) continue;
+    count++;
+    if (f.bytes == null) unknown++; else bytes += f.bytes;
+  }
+  const label = $('selectioncount');
+  label.textContent = count
+    ? `${count.toLocaleString()} selected · ${bytesText(bytes)}${unknown ? ` + ${unknown} of unknown size` : ''}`
+    : 'No files selected';
+  label.classList.toggle('has', count > 0);
+  $('clearselection').hidden = !count;
+
+  // Blocked rows are visible for diagnosis but never included by select-all.
+  let selectable = 0, chosen = 0, any = false;
+  for (const f of filteredFiles()) {
+    const on = selected.has(f.id);
+    any ||= on;
+    if (f.action_blocked) continue;
+    selectable++;
+    if (on) chosen++;
+  }
+  const all = $('selectfiltered');
+  all.checked = selectable > 0 && chosen === selectable;
+  all.indeterminate = !all.checked && any;
+  all.disabled = !selectable;
+  updateActions(count);
+}
+
 /** Reflect completeness, busy state, selection, and current view in the controls.
  * These are usability guards only; the native command handler enforces the same constraints. */
-function updateActions(){const count=inventoryState.rows.filter(f=>selected.has(f.id)).length;reviewButton.disabled=!count||!inventoryState.complete||inventoryState.busy;reviewButton.textContent=jobActive?(viewMode==='trash'?'Review queued restore':'Review queued deletion'):(viewMode==='trash'?'Review restore':'Review move to Trash');document.querySelector('#inventory h1').textContent=viewMode==='trash'?'Trash':'Your cloud files';const scan=document.getElementById('scanall');scan.textContent=viewMode==='trash'?'Refresh Trash':inventoryState.rows.length?'Refresh all files':'Scan all files';scan.disabled=inventoryState.busy||jobActive;document.getElementById('exportcsv').disabled=viewMode==='trash'||!filesState.rows.length;document.getElementById('folderfilter').disabled=viewMode==='trash';document.getElementById('cancelscan').classList.toggle('hidden',viewMode==='trash'||!inventoryState.busy);if(viewMode==='trash'&&!inventoryState.error)document.getElementById('scanstate').textContent=inventoryState.busy?'Loading every page of Trash…':inventoryState.complete?'Trash loaded. Select files to restore.':'Load Trash after connecting to your Library.';}
-/** Layer action-state updates after every base render, including sort/filter/selection changes. */
-const renderFilesOriginal=renderFiles;renderFiles=()=>{renderFilesOriginal();updateActions()};
-/** Always retain incoming snapshots, but repaint only the currently visible Files/Trash view. */
-const showInventoryOriginal=window.showInventory;window.showInventory=data=>{filesState=data;if(viewMode==='files')showInventoryOriginal(data);updateActions()};window.showTrash=data=>{trashState={...data,pages:0};if(viewMode==='trash')showInventoryOriginal(trashState);updateActions()};
-/** Switch snapshots and clear cross-view filters/selections; lazily load Trash on first entry. */
-function switchView(mode){viewMode=mode;selected.clear();selectionAnchor=null;tablePage=0;document.getElementById('findfiles').value='';document.getElementById('folderfilter').value='';page('inventory');document.querySelectorAll('aside button').forEach(b=>b.classList.remove('active'));document.getElementById(mode==='trash'?'nav-trash':'nav-inventory').classList.add('active');showInventoryOriginal(mode==='trash'?trashState:filesState);updateActions();if(mode==='trash'&&!trashState.complete&&!trashState.busy)send('load_trash')}
-/** Once both views exist, the shared refresh button routes to the appropriate native listing. */
-startScan=()=>{selected.clear();selectionAnchor=null;tablePage=0;send(viewMode==='trash'?'load_trash':'scan')};
-/** Render batch receipts and stop controls. Attention counts remain visible while details
- * stay collapsed unless the user opens them; receipt messages are plain text, not markup. */
-window.showJob=data=>{jobActive=data.active;jobBox.classList.remove('hidden');jobBox.replaceChildren();const summary=document.createElement('summary');const ok=data.outcomes.filter(o=>o.status==='verified').length,bad=data.outcomes.filter(o=>!['verified','skipped'].includes(o.status)).length;summary.textContent=`${data.action==='trash'?'Trash':'Restore'} batch: ${ok} verified · ${bad} need attention · ${data.remaining+(data.active?1:0)} remaining · ${queuedBatchCount} batches queued (${queuedFileCount} files)`;jobBox.append(summary);if(data.active){const stop=document.createElement('button');stop.textContent=data.stopping?'Stopping after current file…':'Stop all queued work';stop.disabled=data.stopping;stop.onclick=()=>send('stop_actions');jobBox.append(stop)}if(data.stopping&&!data.active){const note=document.createElement('div');note.textContent='Queue stopped. Unprocessed files are available in the list again.';jobBox.append(note)}for(const o of data.outcomes){const div=document.createElement('div');div.style.padding='5px';div.textContent=o.name+' — '+o.message;jobBox.append(div)}jobBox.classList.toggle('has-errors',bad>0);updateActions()};
-document.querySelector('header .badge').textContent='LOCAL';document.querySelector('header .right').textContent='Your ChatGPT storage, in one place';document.querySelector('aside .foot').textContent='Trash is recoverable through ChatGPT. No permanent-delete action.';document.getElementById('nav-overview').style.display='none';document.getElementById('nav-evidence').textContent='⌘   Diagnostics';document.getElementById('status').textContent='Ready. Scan all files to connect.';
-renderFiles();
+function updateActions(count) {
+  const store = stores[viewMode], trash = viewMode === 'trash';
+  if (count === undefined) {
+    count = 0;
+    for (const id of selected) if (store.rows.has(id)) count++;
+  }
+  const review = $('review-selection');
+  review.disabled = !count || !store.complete || store.busy;
+  review.classList.toggle('danger-outline', !trash);
+  $('review-icon').setAttribute('href', trash ? '#i-restore' : '#i-trash');
+  $('review-label').textContent = jobActive
+    ? (trash ? 'Add to restore queue…' : 'Add to Trash queue…')
+    : (trash ? 'Restore…' : 'Move to Trash…');
+  $('scanlabel').textContent = trash ? (store.complete ? 'Refresh' : 'Load Trash')
+    : store.rows.size ? 'Refresh' : 'Scan all files';
+  $('scanall').disabled = store.busy || jobActive;
+  // A running scan offers Stop in the same place; Trash loading cannot be cancelled.
+  $('scanall').hidden = !trash && store.busy;
+  // Emphasize the listing button only while it is the step that unblocks everything else:
+  // an incomplete list that still has rows. An empty list offers the same step in place.
+  $('scanall').classList.toggle('primary', !store.complete && !store.busy && store.rows.size > 0);
+  $('cancelscan').hidden = trash || !store.busy;
+  $('exportcsv').hidden = trash;
+  let exportable = false;
+  for (const row of stores.files.rows.values()) if (!row.folder) { exportable = true; break; }
+  $('exportcsv').disabled = !exportable;
+}
+
+// Listing pages can arrive many times a second. Redraw at most every RENDER_INTERVAL
+// while a listing is running, and immediately once it settles.
+const RENDER_INTERVAL = 200;
+let renderTimer = null, lastRender = 0;
+function requestRender() {
+  const busy = stores[viewMode].busy;
+  if (renderTimer !== null) {
+    if (busy) return;
+    clearTimeout(renderTimer);
+  }
+  const wait = busy ? Math.max(0, RENDER_INTERVAL - (performance.now() - lastRender)) : 0;
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    lastRender = performance.now();
+    renderFiles();
+  }, wait);
+}
+
+/** A store changed: drop selections that no longer exist or became blocked, then redraw
+ * if that store is on screen. The other view only needs its sidebar count refreshed. */
+function storeChanged(view) {
+  if (view === viewMode) {
+    const rows = stores[view].rows;
+    for (const id of selected) {
+      const row = rows.get(id);
+      if (!row || row.action_blocked) selected.delete(id);
+    }
+  }
+  requestRender();
+}
+function applyState(store, data) {
+  for (const key of ['busy', 'complete', 'error', 'pages']) if (key in data) store[key] = data[key];
+}
+function replaceStore(view, data) {
+  const store = stores[view];
+  store.rows = new Map(data.rows.map(row => [row.id, prepare(row)]));
+  store.version++;
+  applyState(store, data);
+  storeChanged(view);
+}
+/** Authoritative snapshots: the start and end of a listing, and sign-in changes. */
+window.showInventory = data => replaceStore('files', data);
+window.showTrash = data => replaceStore('trash', data);
+/** Incremental update: listing pages while a scan runs, and each verified file change. */
+window.patchView = data => {
+  const store = stores[data.view];
+  if (!store) return;
+  for (const row of data.upsert) store.rows.set(row.id, prepare(row));
+  for (const id of data.remove) store.rows.delete(id);
+  if (data.upsert.length || data.remove.length) store.version++;
+  applyState(store, data);
+  storeChanged(data.view);
+};
+
+// ---- Sections and navigation ------------------------------------------------
+const navOf = {inventory: () => viewMode === 'trash' ? 'nav-trash' : 'nav-files', browser: () => 'nav-browser', evidence: () => 'nav-evidence'};
+let section = 'inventory';
+/** Show one section and mark its sidebar entry. Rust is told separately whether the
+ * native browser view should be visible. */
+function showSection(name) {
+  section = name;
+  for (const el of document.querySelectorAll('main > section')) el.classList.toggle('active', el.id === name);
+  const active = navOf[name]();
+  for (const el of document.querySelectorAll('.nav-item')) el.classList.toggle('active', el.id === active);
+}
+/** Files and Trash share the table. Switching clears selection and view-specific filters
+ * so a selection made in one context cannot become an action in the other. */
+function switchView(mode) {
+  if (mode !== viewMode) {
+    viewMode = mode;
+    selected.clear();
+    selectionAnchor = null;
+    tablePage = 0;
+    $('findfiles').value = '';
+    $('folderfilter').value = '';
+  }
+  showSection('inventory');
+  send('inventory');
+  renderFiles();
+  $('table-wrap').scrollTop = 0;
+  if (mode === 'trash' && !stores.trash.complete && !stores.trash.busy) send('load_trash');
+}
+$('nav-files').onclick = () => switchView('files');
+$('nav-trash').onclick = () => switchView('trash');
+$('nav-browser').onclick = () => { showSection('browser'); send('browser'); };
+$('nav-evidence').onclick = () => { showSection('evidence'); send('evidence'); };
+for (const button of document.querySelectorAll('[data-command]')) button.onclick = () => send(button.dataset.command);
+/** Rust returns the shell to the file list when browsing is paused for queued changes. */
+window.showFiles = () => showSection('inventory');
+/** Rust opened a file in ChatGPT and already made the browser view visible. */
+window.selectBrowser = () => showSection('browser');
+
+// The native ChatGPT view is positioned over this element. Report its rectangle whenever
+// the layout changes; sections stay laid out while hidden, so it is always measurable.
+const browserHost = $('browser-host');
+function reportBrowserBounds() {
+  const r = browserHost.getBoundingClientRect();
+  if (r.width > 0 && r.height > 0) send('bounds:' + JSON.stringify([r.left, r.top, r.width, r.height]));
+}
+new ResizeObserver(reportBrowserBounds).observe(browserHost);
+
+// ---- Table interaction ------------------------------------------------------
+/** Start a listing for the current view. Rust decides whether it may run. */
+function startScan() {
+  selected.clear();
+  selectionAnchor = null;
+  tablePage = 0;
+  send(viewMode === 'trash' ? 'load_trash' : 'scan');
+}
+/** Toggle direction for the current column and return to page one without losing selection. */
+function sortBy(key) {
+  sortDirection = sortKey === key ? -sortDirection : (key === 'name' ? 1 : -1);
+  sortKey = key;
+  tablePage = 0;
+  renderFiles();
+}
+function changePage(step) {
+  tablePage += step;
+  renderFiles();
+  $('table-wrap').scrollTop = 0;
+}
+$('scanall').onclick = startScan;
+$('empty-action').onclick = () => {
+  if (!stores[viewMode].rows.size) { startScan(); return; }
+  $('findfiles').value = '';
+  $('typefilter').value = 'all';
+  $('folderfilter').value = '';
+  tablePage = 0;
+  renderFiles();
+};
+$('cancelscan').onclick = () => send('cancel');
+$('exportcsv').onclick = () => send('export_csv');
+$('prevpage').onclick = () => changePage(-1);
+$('nextpage').onclick = () => changePage(1);
+$('clearselection').onclick = () => { selected.clear(); selectionAnchor = null; paintSelection(); };
+for (const th of document.querySelectorAll('th[data-sort]')) th.querySelector('button').onclick = () => sortBy(th.dataset.sort);
+for (const id of ['findfiles', 'typefilter', 'folderfilter']) $(id).addEventListener('input', () => { tablePage = 0; renderFiles(); });
+/** Header selection spans all matching pages. A blocked file cannot be reselected until refresh. */
+$('selectfiltered').onchange = e => {
+  selectionAnchor = null;
+  for (const f of filteredFiles()) {
+    if (f.action_blocked) continue;
+    if (e.target.checked) selected.add(f.id); else selected.delete(f.id);
+  }
+  paintSelection();
+};
+/** One listener for every row. A checkbox applies its own state; a file name opens the
+ * ChatGPT preview; anything else on the row (and any Shift-click) selects, so ranges can
+ * start and end on a name or on empty row space. Trash names select instead of opening. */
+$('filebody').addEventListener('click', e => {
+  const tr = e.target.closest('tr[data-id]');
+  if (!tr) return;
+  const id = tr.dataset.id, check = tr.cells[0].firstChild;
+  if (e.target === check) {
+    selectRange(filteredFiles(), id, check.checked, e.shiftKey);
+  } else if (e.target.closest('.file-link') && viewMode === 'files' && !e.shiftKey) {
+    send('open:' + id);
+    return;
+  } else if (e.shiftKey) {
+    selectRange(filteredFiles(), id, true, true);
+  } else {
+    selectRange(filteredFiles(), id, !selected.has(id), false);
+  }
+  paintSelection();
+});
+/** File-manager keys: Ctrl+F search, Ctrl+A select all matching, Delete opens the review
+ * dialog (nothing changes without confirming there), Escape clears search or selection. */
+document.addEventListener('keydown', e => {
+  if (section !== 'inventory' || $('review-dialog').open) return;
+  const search = $('findfiles'), typing = ['INPUT', 'SELECT'].includes(e.target.tagName) && e.target.type !== 'checkbox';
+  const command = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
+  if (command && key === 'f') {
+    e.preventDefault();
+    search.focus();
+    search.select();
+  } else if (e.key === 'Escape' && e.target === search && search.value) {
+    search.value = '';
+    tablePage = 0;
+    renderFiles();
+  } else if (typing) {
+    return;
+  } else if (command && key === 'a') {
+    e.preventDefault();
+    selectionAnchor = null;
+    for (const f of filteredFiles()) if (!f.action_blocked) selected.add(f.id);
+    paintSelection();
+  } else if (e.key === 'Delete' && !$('review-selection').disabled) {
+    $('review-selection').click();
+  } else if (e.key === 'Escape' && selected.size) {
+    selected.clear();
+    selectionAnchor = null;
+    paintSelection();
+  }
+});
+
+// ---- Reviewed changes -------------------------------------------------------
+/** Request a review of IDs still present in the current view. Rust repeats all safety checks. */
+$('review-selection').onclick = () => {
+  const rows = stores[viewMode].rows;
+  const ids = [...selected].filter(id => rows.has(id) && !reservedIds.has(id));
+  send('review:' + JSON.stringify({action: viewMode === 'trash' ? 'restore' : 'trash', ids}));
+};
+/** Consume the review nonce exactly once on confirmation; cancel and Escape invalidate it.
+ * The nonce identifies the reviewed selection, not an arbitrary client-provided file list. */
+let reviewNonce = null;
+const dialog = $('review-dialog');
+dialog.addEventListener('cancel', () => { send('cancel_review'); reviewNonce = null; });
+$('review-cancel').onclick = () => { send('cancel_review'); reviewNonce = null; dialog.close(); };
+$('review-confirm').onclick = () => {
+  if (reviewNonce == null) return;
+  const nonce = reviewNonce;
+  reviewNonce = null;
+  dialog.close();
+  send('confirm:' + nonce);
+};
+/** Show the native-approved selection using textContent. Default focus stays on Cancel. */
+window.showReview = r => {
+  reviewNonce = r.nonce;
+  const trash = r.action === 'trash', count = r.files.length, noun = count === 1 ? 'file' : 'files';
+  const total = r.files.reduce((sum, f) => sum + (f.bytes || 0), 0);
+  $('review-title').textContent = `${trash ? 'Move' : 'Restore'} ${count.toLocaleString()} ${noun}${trash ? ' to Trash' : ''}?`;
+  $('review-total').textContent = `${bytesText(total)} in total` + (jobActive ? ' · runs after the batch in progress' : '');
+  $('review-note').textContent = trash
+    ? 'ChatGPT removes trashed files permanently after 30 days. Until then they can be restored from Trash. This app never deletes files permanently.'
+    : 'These files return to your Library. ChatGPT may reject a restore if your storage is full.';
+  const list = document.createDocumentFragment();
+  for (const f of r.files) {
+    const row = document.createElement('div'), name = document.createElement('span'), size = document.createElement('span');
+    row.className = 'review-item';
+    name.textContent = f.name;
+    size.textContent = bytesText(f.bytes);
+    row.append(name, size);
+    list.append(row);
+  }
+  $('review-files').replaceChildren(list);
+  const confirm = $('review-confirm');
+  confirm.textContent = jobActive ? 'Add to queue' : trash ? 'Move to Trash' : 'Restore';
+  confirm.className = trash ? 'btn danger' : 'btn primary';
+  dialog.showModal();
+  $('review-cancel').focus();
+};
+
+// ---- Batch progress ---------------------------------------------------------
+/** Rust sends each outcome once, with running totals. Outcomes accumulate here, and the
+ * list stays collapsed unless opened; receipt messages are plain text, not markup. */
+let job = null, jobShown = 0;
+window.showJob = data => {
+  jobActive = data.active;
+  if (!job || job.id !== data.id || data.offset === 0) {
+    $('job-list').replaceChildren();
+    jobShown = 0;
+  }
+  job = data;
+  let released = false;
+  const items = document.createDocumentFragment();
+  for (const o of data.outcomes) {
+    const row = document.createElement('div'), name = document.createElement('span'), message = document.createElement('span');
+    row.className = ['verified', 'skipped'].includes(o.status) ? 'job-item' : 'job-item problem';
+    name.textContent = o.name;
+    message.textContent = o.message;
+    row.append(name, message);
+    items.append(row);
+    // A file with an outcome is no longer reserved: failed or skipped rows return to the list.
+    released = reservedIds.delete(o.id) || released;
+  }
+  jobShown += data.outcomes.length;
+  $('job-list').append(items);
+  $('job').hidden = false;
+  if (released) {
+    reservedVersion++;
+    requestRender();
+  } else {
+    paintJob();
+    updateActions();
+  }
+};
+function paintJob() {
+  if (!job) return;
+  const trash = job.action === 'trash', done = job.verified + job.attention + job.skipped, total = done + job.remaining;
+  const parts = [];
+  if (job.active) parts.push(job.stopping ? 'Stopping after the current file…' : `${trash ? 'Moving to Trash' : 'Restoring'} · ${done.toLocaleString()} of ${total.toLocaleString()}`);
+  else parts.push(`${job.verified.toLocaleString()} ${job.verified === 1 ? 'file' : 'files'} ${trash ? 'moved to Trash' : 'restored'}`);
+  if (job.attention) parts.push(`${job.attention.toLocaleString()} ${job.attention === 1 ? 'needs' : 'need'} attention`);
+  if (job.skipped) parts.push(`${job.skipped.toLocaleString()} not attempted`);
+  if (queuedBatchCount) parts.push(`${queuedBatchCount} more ${queuedBatchCount === 1 ? 'batch' : 'batches'} queued (${queuedFileCount.toLocaleString()} files)`);
+  $('job-text').textContent = parts.join(' · ');
+  $('job-bar').style.width = (total ? done / total * 100 : 100) + '%';
+  $('job').className = 'job ' + (job.attention ? 'attention' : job.active ? 'running' : 'done');
+  $('job-stop').hidden = !job.active;
+  $('job-stop').disabled = job.stopping;
+  $('job-dismiss').hidden = job.active;
+  $('job-toggle').hidden = !jobShown;
+}
+$('job-stop').onclick = () => send('stop_actions');
+$('job-toggle').onclick = () => {
+  const open = $('job-list').hidden;
+  $('job-list').hidden = !open;
+  $('job-toggle').setAttribute('aria-expanded', String(open));
+};
+$('job-dismiss').onclick = () => { $('job').hidden = true; };
 
 /** Close a stale review and clear selection when credentials or account context change. */
-window.invalidateContext=()=>{reservedIds.clear();queuedBatchCount=0;queuedFileCount=0;selected.clear();selectionAnchor=null;reviewNonce=null;dialog.close();tablePage=0;};
+window.invalidateContext = () => {
+  reservedIds = new Set();
+  reservedVersion++;
+  queuedBatchCount = 0;
+  queuedFileCount = 0;
+  selected.clear();
+  selectionAnchor = null;
+  reviewNonce = null;
+  dialog.close();
+  tablePage = 0;
+};
 
-// Compact file-browser layout: keep navigation and activity subordinate to files.
-/** Density overrides are applied last within this module. They do not alter table behavior.
- * The native browser bounds in main.rs must remain aligned with this sidebar/header geometry. */
-const compactStyle=document.createElement('style');compactStyle.textContent=`
-header{height:44px;padding:0 14px;gap:9px}header strong{font-size:17px;letter-spacing:-.3px}header>span:first-child{font-size:21px!important}header .badge{font-size:9px;padding:3px 6px}header .right{display:none}
-aside{top:44px;width:184px;padding:10px 8px;gap:3px}aside button{padding:8px 10px;font-size:13px;border-radius:5px}aside .label{margin:9px 10px 5px;font-size:9px;letter-spacing:1px}aside .label[style]{margin-top:14px!important}aside .foot{display:none}#status{font-size:11px;line-height:1.4;padding:8px 3px;max-height:64px}
-main{left:184px;right:0;top:44px;bottom:0;overflow:hidden}#inventory{padding:12px;gap:8px;min-width:0}#inventory .invhead{gap:14px;min-height:32px;flex-shrink:0}#inventory h1{font-size:20px;letter-spacing:-.5px;white-space:nowrap}.invhead .actions{gap:6px}.invhead .actions button{padding:7px 10px;font-size:12px}.summary{gap:12px;font-size:11px;white-space:nowrap}.summary strong{font-size:14px;margin-right:4px}#scanstate{font-size:11px;min-height:14px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
-.filters{gap:7px;flex-shrink:0}.filters input,.filters select{padding:7px 9px;font-size:12px;height:34px}.filters select{max-width:180px}.tablewrap{min-height:80px;border-radius:6px;scrollbar-width:thin;scrollbar-color:#49616d #142128}th,td{padding:7px 10px}thead{height:31px}#filebody td.name{padding-top:4px;padding-bottom:4px}#filebody td.name button.file-link{height:28px;gap:8px}#filebody .file-visual{flex-basis:28px;width:28px;height:28px}#filebody .file-visual img{width:28px;height:28px}
-.selection{gap:8px;min-height:32px;flex-shrink:0;font-size:11px}.selection button{padding:6px 9px;font-size:12px}.selection .pagination{gap:8px}#job-results{flex-shrink:0;max-height:120px!important;padding:6px 9px!important;scrollbar-width:thin}#job-results summary{cursor:pointer;color:#a9c8c0;line-height:18px}#job-results.has-errors summary{color:#efbd8d}#job-results[open]{background:#152129}#job-results>div{padding:3px 0!important}#job-results:not([open]){overflow:hidden}#evidence{overflow:auto}#browser-note{padding:14px}
-@media(max-width:1100px){.invhead{flex-wrap:wrap}.invhead .summary{order:3;width:100%}#inventory .invhead{gap:6px 12px}.summary{gap:12px}}
-`;document.head.append(compactStyle);
-document.querySelector('.invhead').insertBefore(document.querySelector('.summary'),document.querySelector('.invhead .actions'));
+// ---- Sidebar status, storage, diagnostics -----------------------------------
+/** The sidebar status line is visible in every section, including over the ChatGPT view.
+ * Refusals and failures arrive flagged so they stand out from routine progress. */
+window.showStatus = (text, alert = false) => {
+  $('status').textContent = text;
+  $('status').title = text;
+  $('status').classList.toggle('alert', alert);
+};
+/** Quota figures from the storage endpoint; hidden when the shape is not recognized. */
+window.showUsage = usage => {
+  const used = usage?.used_bytes, allowed = usage?.allowed_bytes;
+  const known = Number.isFinite(used) && Number.isFinite(allowed) && allowed > 0;
+  $('usage').hidden = !known;
+  if (!known) return;
+  const share = used / allowed, full = usage.is_over_limit === true || share >= 1;
+  $('usage').classList.toggle('full', full);
+  $('usage-percent').textContent = full ? 'Full' : Math.floor(share * 100) + '%';
+  $('usage-bar').style.width = Math.min(100, share * 100) + '%';
+  $('usage-text').textContent = `${bytesText(used)} of ${bytesText(allowed)} used`;
+};
+const evidenceHelp = [
+  'Reports contain field names, types, and array counts.',
+  'Response values, request headers, and query strings are excluded. Unknown schema keys are redacted.',
+  'Only matching ChatGPT metadata paths are inspected. Empty results do not mean your Library is empty.',
+  'Saved reports go to the private reports folder under %LOCALAPPDATA%\\GPTStorageBrowser.',
+].join('\n\n');
+window.showEvidence = items => {
+  $('count').textContent = items.length ? String(items.length) : '';
+  $('save').disabled = !items.length;
+  const list = $('list');
+  list.replaceChildren();
+  if (!items.length) {
+    const hint = document.createElement('p');
+    hint.textContent = 'No responses observed yet. Turn on inspection, then browse your Library in the ChatGPT view.';
+    list.append(hint);
+    $('detail').textContent = evidenceHelp;
+  }
+  for (const item of items) {
+    const entry = document.createElement('button');
+    entry.type = 'button';
+    entry.textContent = `${item.status} ${item.method} ${item.path}`;
+    entry.onclick = () => {
+      for (const other of list.children) other.classList.toggle('active', other === entry);
+      $('detail').textContent = item.schema;
+    };
+    list.append(entry);
+  }
+};
+$('capture').onchange = e => send(e.target.checked ? 'capture:on' : 'capture:off');
+$('save').onclick = () => send('export');
+$('clearevidence').onclick = () => send('clear');
+window.showEvidence([]);
+renderFiles();

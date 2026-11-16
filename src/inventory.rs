@@ -8,6 +8,26 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
+/// Hard stop for one scan. Reaching it leaves the inventory visibly incomplete.
+pub const MAX_PAGES: usize = 10_000;
+
+/// Listing fields read by `parse_row` and `Inventory::accept`. The browser-side fetch
+/// keeps only these keys, so large listing pages cross the script bridge cheaply.
+pub const ROW_FIELDS: [&str; 12] = [
+    "id",
+    "name",
+    "file_name",
+    "file_size_bytes",
+    "updated_at",
+    "mime_type",
+    "parent_directory_id",
+    "directory_id",
+    "file_id",
+    "access_kind",
+    "library_artifact_type",
+    "trashed_at",
+];
+
 #[derive(Clone, Serialize, Debug)]
 /// Shared metadata contract for the Rust coordinator and JavaScript table.
 /// This is a snapshot, not permission to mutate: eligibility and live preflight run later.
@@ -40,6 +60,10 @@ pub struct Inventory {
     pub queue: VecDeque<PageTask>,
     visited: HashSet<(Option<String>, Option<String>)>,
     folders: HashSet<String>,
+    /// Tasks handed out by `next` whose responses have not been accepted yet.
+    active: usize,
+    /// IDs inserted since the last `take_fresh`, for incremental UI updates.
+    fresh: Vec<String>,
     pub pages: usize,
     pub complete: bool,
     pub error: Option<String>,
@@ -55,14 +79,21 @@ impl Inventory {
         });
         s
     }
-    /// Take one unseen task. Only an empty queue marks the snapshot complete.
-    /// Callers must accept each response before requesting the next task.
+    /// Take one unseen task. Several tasks may be outstanding at once: different
+    /// folders are independent, while each cursor chain stays sequential because a
+    /// continuation is only queued by the response that names it.
+    /// The snapshot is complete only when the queue is empty and nothing is outstanding.
     pub fn next(&mut self) -> Result<Option<PageTask>, String> {
-        if self.pages >= 10_000 && !self.queue.is_empty() {
+        if self.queue.is_empty() {
+            if self.active == 0 {
+                self.complete = true;
+            }
+            return Ok(None);
+        }
+        if self.pages + self.active >= MAX_PAGES {
             return Err("Stopped after 10,000 pages; inventory is incomplete.".into());
         }
         let Some(task) = self.queue.pop_front() else {
-            self.complete = true;
             return Ok(None);
         };
         if !self
@@ -71,7 +102,15 @@ impl Inventory {
         {
             return Err("The service repeated a pagination cursor; refresh is required.".into());
         }
+        self.active += 1;
         Ok(Some(task))
+    }
+    /// Rows added or replaced since the previous call, without duplicates.
+    pub fn take_fresh(&mut self) -> Vec<&FileRow> {
+        let mut ids = std::mem::take(&mut self.fresh);
+        ids.sort_unstable();
+        ids.dedup();
+        ids.iter().filter_map(|id| self.rows.get(id)).collect()
     }
     /// Validate one response, merge owned-Library ID forms, and enqueue more work.
     /// Folder IDs are scheduled once; page cursors are checked again when consumed.
@@ -101,6 +140,7 @@ impl Inventory {
             }
             let row = parse_row(item)?;
             self.rows.insert(id.into(), row);
+            self.fresh.push(id.into());
             if folder && self.folders.insert(id.into()) {
                 // Finish current-folder pagination first; visit each discovered folder afterward.
                 self.queue.push_back(PageTask {
@@ -120,6 +160,7 @@ impl Inventory {
             });
         }
         self.pages += 1;
+        self.active = self.active.saturating_sub(1);
         Ok(())
     }
 }
@@ -189,7 +230,7 @@ mod tests {
     #[test]
     fn listing_limit_allows_completion_but_not_an_extra_page() {
         let mut inv = Inventory::start();
-        inv.pages = 10_000;
+        inv.pages = MAX_PAGES;
         assert!(inv.next().is_err());
         inv.queue.clear();
         assert!(inv.next().unwrap().is_none());
@@ -227,6 +268,79 @@ mod tests {
         assert!(inv.next().unwrap().is_none());
         assert!(inv.complete);
         assert_eq!(inv.rows.len(), 3);
+    }
+    #[test]
+    fn folders_overlap_but_completion_waits_for_every_response() {
+        let mut inv = Inventory::start();
+        let root = inv.next().unwrap().unwrap();
+        // Nothing else can start until the root response names more work.
+        assert!(inv.next().unwrap().is_none());
+        assert!(!inv.complete);
+        inv.accept(
+            &root,
+            &json!({"items":[{"id":"libdir_a","name":"A"},{"id":"libdir_b","name":"B"}],"cursor":"more"}),
+        )
+        .unwrap();
+        // The root continuation and both folders are independent requests.
+        let tasks: Vec<_> = std::iter::from_fn(|| inv.next().unwrap()).collect();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].cursor.as_deref(), Some("more"));
+        assert!(!inv.complete);
+        for (n, task) in tasks.iter().enumerate() {
+            assert!(inv.next().unwrap().is_none());
+            assert!(!inv.complete, "a response is still outstanding");
+            inv.accept(
+                task,
+                &json!({"items":[{"id":format!("libfile_{n}"),"name":"f"}],"cursor":null}),
+            )
+            .unwrap();
+        }
+        assert!(inv.next().unwrap().is_none());
+        assert!(inv.complete);
+        assert_eq!(inv.pages, 4);
+    }
+    #[test]
+    fn outstanding_requests_count_toward_the_page_limit() {
+        let mut inv = Inventory::start();
+        inv.pages = MAX_PAGES - 1;
+        inv.queue.push_back(PageTask {
+            parent: Some("libdir_x".into()),
+            cursor: None,
+        });
+        assert!(inv.next().unwrap().is_some());
+        assert!(inv.next().is_err());
+    }
+    #[test]
+    fn fresh_rows_are_reported_once_for_incremental_updates() {
+        let mut inv = Inventory::start();
+        let t = inv.next().unwrap().unwrap();
+        inv.accept(
+            &t,
+            &json!({"items":[{"id":"libfile_a","name":"A"},{"id":"libfile_a","name":"A2"},{"id":"libfile_b","name":"B"}],"cursor":null}),
+        )
+        .unwrap();
+        let fresh: Vec<_> = inv.take_fresh().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(fresh, ["A2", "B"]);
+        assert!(inv.take_fresh().is_empty());
+    }
+    #[test]
+    fn slim_listing_fields_preserve_every_parsed_value() {
+        let full = json!({"id":"libfile_a","name":"A.png","file_name":"ignored","file_size_bytes":7,
+            "updated_at":"2026-01-02T03:04:05Z","mime_type":"image/png","parent_directory_id":"libdir_p",
+            "directory_id":"libdir_other","file_id":"file_1","access_kind":"owned",
+            "library_artifact_type":"page","trashed_at":null,"thumbnail":{"url":"x"},"extra":[1,2,3]});
+        let slim: serde_json::Map<_, _> = full
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| ROW_FIELDS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(slim.len(), ROW_FIELDS.len());
+        assert_eq!(
+            serde_json::to_value(parse_row(&full).unwrap()).unwrap(),
+            serde_json::to_value(parse_row(&Value::Object(slim)).unwrap()).unwrap()
+        );
     }
     #[test]
     fn repeated_cursor_and_invalid_pages_never_complete() {

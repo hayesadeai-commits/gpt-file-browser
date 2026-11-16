@@ -420,6 +420,8 @@ struct Batches {
     active_nonce: u64,
     /// Outcomes of the active job already published to the shell.
     sent: usize,
+    /// What earlier files learned about confirming a change without reading all of Trash.
+    lookup: changes::TrashLookup,
 }
 
 impl Batches {
@@ -444,7 +446,15 @@ impl Batches {
                 outcomes: Vec::new(),
                 stop: false,
             };
-            let result = change_next(browser, session, &mut next, r.nonce, proxy, root);
+            let result = change_next(
+                browser,
+                session,
+                &mut next,
+                r.nonce,
+                self.lookup,
+                proxy,
+                root,
+            );
             self.job = Some(next);
             if result.is_err() {
                 let _ = cancel_waiting(&mut self.waiting, root);
@@ -492,12 +502,22 @@ fn change_next(
     session: &service::Session,
     job: &mut changes::Job,
     nonce: u64,
+    lookup: changes::TrashLookup,
     proxy: &Proxy,
     root: &Path,
 ) -> Result<(), String> {
     if let Some(row) = job.take_next() {
-        let result = journal(root, job, nonce)
-            .and_then(|_| changes::run(browser, session, &row, job.action, nonce, proxy.clone()));
+        let result = journal(root, job, nonce).and_then(|_| {
+            changes::run(
+                browser,
+                session,
+                &row,
+                job.action,
+                nonce,
+                lookup,
+                proxy.clone(),
+            )
+        });
         if let Err(e) = result {
             job.current = None;
             job.stop = true;
@@ -695,6 +715,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         waiting: VecDeque::new(),
         active_nonce: 0,
         sent: 0,
+        lookup: changes::TrashLookup::default(),
     };
     // A completed old-session action is still journaled, but must not repopulate new-session rows.
     let mut job_context_valid = true;
@@ -1110,6 +1131,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(j) = batches.job.as_mut() {
                         j.stop = true;
                     }
+                    batches.lookup = changes::TrashLookup::default();
                     scan.halt(MSG_CONTEXT_CHANGED);
                     scan.inv = inventory::Inventory::default();
                     scan.inv.error = Some(MSG_CONTEXT_CHANGED.into());
@@ -1290,6 +1312,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or("Unrecognized action result")
                         .to_string();
                     let trashing = j.action == changes::Action::Trash;
+                    // Hints about cheaper confirmation reads apply to the files that follow.
+                    batches.lookup.learn(&value["lookup"]);
                     if state == "verified" && job_context_valid {
                         let row = inventory::parse_row(&value["node"]).unwrap_or_else(|_| f.clone());
                         let (from, to) = if trashing { ("files", "trash") } else { ("trash", "files") };
@@ -1320,7 +1344,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         message,
                     });
                     if let Some(s) = &session
-                        && let Err(e) = change_next(&browser, s, j, n, &proxy, &root)
+                        && let Err(e) =
+                            change_next(&browser, s, j, n, batches.lookup, &proxy, &root)
                     {
                         status = alert(e);
                     }

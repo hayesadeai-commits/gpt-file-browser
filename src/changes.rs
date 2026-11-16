@@ -3,9 +3,14 @@
 //! Each file is checked against current service metadata before one mutation is
 //! issued. Success requires readback evidence; an HTTP success alone is insufficient.
 //! An uncertain result stops the batch and is never automatically retried.
+//!
+//! The browser-side sequence lives in `changes.js`. Reading all of Trash to confirm one
+//! file costs a request per 50 trashed files, so it first asks Trash for that file alone;
+//! `TrashLookup` carries what has been learned about those cheaper reads between files.
 
 use crate::{AppEvent, inventory::FileRow, service};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::VecDeque;
 use tao::event_loop::EventLoopProxy;
 
@@ -40,6 +45,34 @@ pub struct Job {
     pub outcomes: Vec<Outcome>,
     pub stop: bool,
 }
+/// What is known about confirming a file's state without reading all of Trash.
+/// `Some(true)` works with this service, `Some(false)` does not, `None` is untested.
+/// These hints only choose which read is tried first; they never count as evidence.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize)]
+pub struct TrashLookup {
+    /// Asking the Trash listing for one file by its ID.
+    pub by_id: Option<bool>,
+    /// Asking the Trash listing for one file by name.
+    pub by_name: Option<bool>,
+    /// Whether a file's own node still answers, as trashed, once it is in Trash.
+    pub node: Option<bool>,
+}
+
+impl TrashLookup {
+    /// Merge what a finished file reported. Anything but an explicit boolean is ignored.
+    pub fn learn(&mut self, reported: &Value) {
+        for (key, slot) in [
+            ("by_id", &mut self.by_id),
+            ("by_name", &mut self.by_name),
+            ("node", &mut self.node),
+        ] {
+            if let Some(known) = reported.get(key).and_then(Value::as_bool) {
+                *slot = Some(known);
+            }
+        }
+    }
+}
+
 /// IDs reserved by confirmed work. Keep them out of selection without pretending
 /// that a remote deletion already succeeded. Failed/skipped rows can then reappear.
 pub fn reserved_ids(
@@ -131,14 +164,38 @@ pub fn eligible(f: &FileRow) -> bool {
         && f.file_id.is_some()
 }
 
+/// Build the browser script for one file. The static preflight function is inserted first
+/// and the request data last, so data (which includes the file name) is never scanned for
+/// a placeholder and only ever lands where the script expects a JSON value.
+fn script(
+    session: &service::Session,
+    row: &FileRow,
+    action: Action,
+    lookup: TrashLookup,
+) -> String {
+    let args = serde_json::json!({
+        "file": row,
+        "action": action,
+        "authorization": session.authorization,
+        "account": session.account,
+        "lookup": lookup,
+    });
+    include_str!("changes.js")
+        .replace("__PREFLIGHT__", include_str!("preflight.js"))
+        .replace("__ARGS__", &args.to_string())
+}
+
 /// Run a single preflight, mutation, and verification sequence in ChatGPT.
 /// The generation argument is the review nonce, not the inventory scan generation.
+/// These routes and query parameters were verified in Space's loaded action implementation.
+/// Never request permanent deletion, and never retry an ambiguous mutation.
 pub fn run(
     view: &wry::WebView,
     session: &service::Session,
     row: &FileRow,
     action: Action,
     generation: u64,
+    lookup: TrashLookup,
     proxy: EventLoopProxy<AppEvent>,
 ) -> Result<(), String> {
     if !eligible(row) {
@@ -146,42 +203,7 @@ pub fn run(
             "Only owned Library files can be changed here; use ChatGPT for this item.".into(),
         );
     }
-    let args = serde_json::json!({"file":row,"action":action,"authorization":session.authorization,"account":session.account});
-    let preflight = include_str!("preflight.js");
-    // These routes and query parameters were verified in Space's loaded action implementation.
-    // Never request permanent deletion, and never retry an ambiguous mutation.
-    let script = format!(
-        r#"(async()=>{{
-      if(location.origin!=='https://chatgpt.com')throw Error('Sign-in required');
-      const a={args}, f=a.file, base='/backend-api/files/library/files/'+encodeURIComponent(f.id);
-      const headers={{Authorization:a.authorization}};if(a.account)headers['ChatGPT-Account-ID']=a.account;
-      async function req(url,method='GET',body){{const h={{...headers}};if(body)h['Content-Type']='application/json';const r=await fetch(url,{{method,credentials:'include',headers:h,body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(30000)}});let b=null;try{{b=await r.json()}}catch{{}}return {{status:r.status,body:b}}}}
-      function isTrashed(n){{return n&&n.trashed_at!=null}}
-      let trashProblem=null;
-      // Normal node lookup excludes trashed files. Walk the dedicated Trash listing instead.
-      // The page bound matches the Trash browser; repeated/malformed cursors fail closed.
-      async function findInTrash(){{let cursor=null;const seen=new Set();for(let page=0;page<1000;page++){{const r=await req('/backend-api/files/library','POST',{{limit:50,cursor,trashed_only:true,include_hidden_files:true}});if(r.status!==200||!Array.isArray(r.body?.items)||!Object.hasOwn(r.body,'cursor')||!(r.body.cursor===null||typeof r.body.cursor==='string')){{trashProblem='Trash response could not be verified (HTTP '+r.status+').';return null;}}const match=r.body.items.find(n=>n.id===f.id);if(match)return match;cursor=r.body.cursor;if(!cursor)return null;if(seen.has(cursor)){{trashProblem='Trash repeated a pagination cursor.';return null;}}seen.add(cursor)}}trashProblem='Trash verification exceeded 1,000 pages. No further changes were attempted.';return null}}
-      // Re-read metadata immediately before mutation; scans may be older than the review dialog.
-      let before=a.action==='restore'?{{status:200,body:await findInTrash()}}:await req(base+'/node');
-      if(before.status!==200||before.body?.id!==f.id)return {{status:'failed',message:trashProblem||'Could not verify the selected file before changing it.'}};
-      const n=before.body;
-      const changed=({preflight})(f,n);
-      if(changed)return {{status:'failed',message:'The file changed since scanning ('+changed+'). Refresh and review it again.'}};
-      if(a.action==='trash'&&isTrashed(n)||a.action==='restore'&&!isTrashed(n))return {{status:'failed',message:'File state changed since scanning. Refresh before retrying.'}};
-      // Send exactly one mutation. A timeout can occur after the service commits it.
-      let mutation=null;
-      try{{if(a.action==='trash'){{const q=new URLSearchParams({{soft_delete:'true',file_name:f.name}});if(f.file_id)q.set('file_id',f.file_id);if(f.parent)q.set('parent_directory_id',f.parent);mutation=await req(base+'?'+q,'DELETE')}}else mutation=await req(base+'/restore','POST')}}catch{{}}
-      // Verify state independently of the mutation HTTP code; successful transport is not proof.
-      let after=null;try{{after=await req(base+'/node')}}catch{{}}
-      if(after?.status===200&&after.body?.id===f.id&&Object.hasOwn(after.body,'trashed_at')&&(a.action==='trash'?isTrashed(after.body):!isTrashed(after.body)))return {{status:'verified',message:a.action==='trash'?'Moved to Trash and verified.':'Restored and verified.',node:after.body}};
-      // Retry only readback for eventual consistency, never the DELETE/restore request.
-      if(a.action==='trash'){{for(let attempt=0;attempt<3;attempt++){{if(attempt)await new Promise(resolve=>setTimeout(resolve,750));try{{const match=await findInTrash();if(match&&isTrashed(match))return {{status:'verified',message:'Moved to Trash and verified.',node:match}}}}catch{{}}}}}}
-      if(mutation&&mutation.status>=400&&after?.status===200&&after.body?.id===f.id&&(a.action==='trash'?!isTrashed(after.body):isTrashed(after.body)))return {{status:'failed',message:'Service rejected the change (HTTP '+mutation.status+'). File state is unchanged.'}};
-      // Preserve ambiguity so the coordinator blocks this file instead of risking a duplicate action.
-      return {{status:'uncertain',message:'The request was sent, but its result could not be verified'+(mutation?' (HTTP '+mutation.status+')':'')+'. The file may already be in Trash. '+(trashProblem||'')+' The batch stopped; refresh Library and Trash before trying again.'}};
-    }})()"#
-    );
-    service::evaluate_json(view, script, move |r| {
+    service::evaluate_json(view, script(session, row, action, lookup), move |r| {
         let _ = proxy.send_event(AppEvent::ChangeResult(generation, r));
     })
 }
@@ -196,6 +218,60 @@ mod tests {
             &json!({"id":id,"name":"test.txt","file_id":"file_fixture","access_kind":"owned"}),
         )
         .unwrap()
+    }
+    #[test]
+    fn lookup_hints_merge_only_explicit_answers() {
+        let mut lookup = TrashLookup::default();
+        lookup.learn(&json!({"by_id":true,"by_name":null,"node":false,"other":true}));
+        assert_eq!(
+            lookup,
+            TrashLookup {
+                by_id: Some(true),
+                by_name: None,
+                node: Some(false)
+            }
+        );
+        // A later file that learned nothing new, or returned no hints at all, changes nothing.
+        lookup.learn(&json!({"by_id":null,"node":"yes"}));
+        lookup.learn(&Value::Null);
+        assert_eq!(lookup.by_id, Some(true));
+        assert_eq!(lookup.node, Some(false));
+        lookup.learn(&json!({"by_id":false}));
+        assert_eq!(lookup.by_id, Some(false));
+    }
+    #[test]
+    fn request_data_is_only_ever_inserted_as_a_json_value() {
+        let template = include_str!("changes.js");
+        for placeholder in ["__ARGS__", "__PREFLIGHT__"] {
+            assert_eq!(template.matches(placeholder).count(), 1, "{placeholder}");
+            assert!(!include_str!("preflight.js").contains(placeholder));
+        }
+        // A hostile file name must stay inside its JSON string: it cannot close a comment,
+        // end the string, or be mistaken for a placeholder.
+        let mut file = row("libfile_a");
+        file.name = "*/ __PREFLIGHT__ \"; alert(1); /* __ARGS__.png".into();
+        let session = service::Session {
+            url: String::new(),
+            authorization: "not-exported".into(),
+            account: None,
+        };
+        let lookup = TrashLookup {
+            by_id: Some(true),
+            ..Default::default()
+        };
+        let built = script(&session, &file, Action::Trash, lookup);
+        let name = serde_json::to_string(&file.name).unwrap();
+        assert_eq!(built.matches(&name).count(), 1);
+        let (head, tail) = built.split_once(&name).unwrap();
+        assert!(!head.contains("__PREFLIGHT__") && !tail.contains("__PREFLIGHT__"));
+        assert!(!head.contains("__ARGS__") && !tail.contains("__ARGS__"));
+        assert!(built.contains(r#""lookup":{"by_id":true,"by_name":null,"node":null}"#));
+        assert!(built.contains("const a = {"));
+        // The preflight comparison is embedded exactly once.
+        assert_eq!(built.matches("return 'file version'").count(), 1);
+        // Permanent deletion is never requested.
+        assert!(built.contains("soft_delete: 'true'") && !built.contains("soft_delete: 'false'"));
+        assert!(!built.contains("delete-batch"));
     }
     #[test]
     fn queued_batches_run_fifo_only_after_the_active_batch_finishes() {

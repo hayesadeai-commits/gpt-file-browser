@@ -26,6 +26,7 @@ The sidebar shows how much of your ChatGPT storage is used once a scan has conne
 - Small image thumbnails beside file names, and a type glyph for other files. Hover over a thumbnail for an enlarged image pop-out; moving away dismisses it without navigation. Clicking the file name still opens ChatGPT.
 - The app-managed thumbnail and hover caches stay in memory; normal WebView2 browser data is kept in the private profile folder. Thumbnails fall back to original content when a thumbnail fails. Original-content previews fetch up to 32 MiB, fit the window, and cap decoded output at 2048 pixels per side; four enlarged previews are cached. Unsupported or oversized images show an unavailable message.
 - Reviewed, queued bulk Trash and restore for owned ordinary Library files. Manage Pages, Sites, folders and shared items in ChatGPT's native interface.
+- Fast confirmation of each move: once a file's own metadata no longer answers, the app asks the Trash listing for that one file (by ID, then by name) instead of reading all of Trash, which used to cost one request per 50 trashed files for every file processed. Whether ChatGPT honours those filters is learned on the first file and remembered for the rest of the session; if it does not, the complete Trash listing is read as before. A lookup result only counts if the Trash entry was stamped by that request.
 - Per-file verification and action receipts. An uncertain or failed result stops the remaining files in that batch and cancels waiting batches. Unprocessed rows return to the list; the affected file remains blocked until refresh. No permanent-delete command.
 
 Refresh if the collection changed elsewhere. Before changes, the app checks identity, ownership, name, parent, size, available timestamp and current Trash state. Failed scans remain visibly incomplete; bulk changes require an initial completed scan. Verified changes update the inventory, so another batch does not require rescanning. A failed or uncertain action blocks only that file until refresh; unaffected files remain available for a new reviewed batch. Queued work is not automatically resumed after closing the app or changing sign-in context. ChatGPT navigation and scanning are paused during processing so they cannot interrupt an active request. While files are being listed, the **ChatGPT**, **Library**, and **Reload** buttons and opening a file are paused for the same reason; stop the scan to browse. Quota usage can update separately from file visibility.
@@ -46,7 +47,7 @@ The app learns the Library request context from the signed-in page. Session head
 
 **Diagnostics** provides optional sanitized response schemas. ChatGPT's observed web endpoints are not a supported public personal-storage API, so service changes may require an app update. Native ChatGPT actions remain available in the embedded browser.
 
-Explicit limits: 10,000 listing pages per scan (counting requests still in flight), six concurrent listing requests, 1,000 Trash pages, 5,000 files per reviewed batch, up to 20 waiting batches, and up to 10,000 reserved files across active and waiting work. Large/invalid responses and repeated cursors stop the operation rather than report a complete inventory. File-change verification may search up to 1,000 pages of 50 Trash items when normal metadata lookup is unavailable.
+Explicit limits: 10,000 listing pages per scan (counting requests still in flight), six concurrent listing requests, 1,000 Trash pages, 5,000 files per reviewed batch, up to 20 waiting batches, and up to 10,000 reserved files across active and waiting work. Large/invalid responses and repeated cursors stop the operation rather than report a complete inventory. File-change verification may search up to 1,000 pages of 50 Trash items when neither the file's own metadata nor a direct Trash lookup can confirm the change.
 
 ## Build and tests
 
@@ -63,6 +64,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 node --check src/inventory.js
 node --check src/thumbnails.js
+node --check src/changes.js
 node tests/preflight.cjs
 cargo build --release --locked
 ```
@@ -98,7 +100,8 @@ The source ignore rules exclude local secrets, profiles, reports, binaries, and 
 | [src/inventory.rs](src/inventory.rs) | Normalized metadata, concurrent folder traversal, pagination, and completeness |
 | [src/service.rs](src/service.rs) | Authenticated browser requests (bounded retry, slim listing rows) and asynchronous JSON results |
 | [src/capture.rs](src/capture.rs) / [src/schema.rs](src/schema.rs) | Session observation, bounded schema diagnostics, and URL boundaries |
-| [src/changes.rs](src/changes.rs) / [src/preflight.js](src/preflight.js) | Reviewed soft-delete/restore, live metadata checks, and readback verification |
+| [src/changes.rs](src/changes.rs) | Reviewed soft-delete/restore: batches, eligibility, lookup hints, and script assembly |
+| [src/changes.js](src/changes.js) / [src/preflight.js](src/preflight.js) | The browser-side sequence for one file: live metadata check, one mutation, readback verification |
 | [src/ui.html](src/ui.html) / [src/ui.css](src/ui.css) | Trusted local shell markup, icon sprite, and the single stylesheet (light/dark tokens) |
 | [src/inventory.js](src/inventory.js) | View stores, incremental updates, sorting/filtering, range selection, review dialogs, and batch progress |
 | [src/preview.rs](src/preview.rs) / [src/thumbnails.js](src/thumbnails.js) | Image loading/rasterization, lazy thumbnails, hover state, and caches |
@@ -112,6 +115,8 @@ The source ignore rules exclude local secrets, profiles, reports, binaries, and 
 - Every listing request has an ID that is never reused; a reply is applied only while its request is still registered, so replies from a stopped or restarted scan are inert. Trash keeps its own generation. A review nonce binds confirmation to the native-approved selection.
 - A scan is complete only when its queue is empty and every issued page has been accepted. Storage usage is fetched alongside the listing and never gates or invalidates it.
 - Rust sends the shell full snapshots only at the start and end of a listing and on sign-in changes. Listing pages and per-file results are sent as incremental patches (`patchView`, `showJob`), so their cost does not grow with the collection.
+- Lookup hints (`TrashLookup`) only decide which confirmation read is tried first. They never count as evidence: with every shortcut claimed to work, a change that cannot be seen is still reported as uncertain.
+- Request data is inserted into [src/changes.js](src/changes.js) last and exactly once, where a JSON value is expected, so a file name cannot alter the script.
 - Only one mutation is active across all batches. Confirmed files are reserved until processed, preventing duplicate queueing. The active operation nonce is independent from newer review-dialog nonces. Persist pending work before issuing it; verify remote state afterward. Retry readback, never an ambiguous mutation.
 - An uncertain file is quarantined until refresh, while unrelated files remain usable. A changed session clears account-bound snapshots and reviews.
 - UI pagination changes rendering only. Sorting, search, select-all, and Shift-click operate on the complete filtered snapshot, which is cached until its inputs change.

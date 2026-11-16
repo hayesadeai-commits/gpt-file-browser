@@ -4,9 +4,9 @@ Documentation reviewed against the current source on November 15, 2026. This fil
 
 ## Latest recorded checks
 
-These were run on the revision that added concurrent listing, incremental UI updates, and the redesigned interface:
+These were run on the revision that added direct Trash lookups for confirming a move (on top of concurrent listing, incremental UI updates, and the redesigned interface):
 
-- 33 Rust unit tests passed.
+- 35 Rust unit tests passed.
 - JavaScript regression groups passed: preflight comparisons, Trash verification and pagination, the listing fetch (bounded retry, backoff, slim rows), hover lifecycle/retry behavior, Shift-click ranges, queue visibility with whole-collection filtering/sorting/caching, size and file-kind formatting, and JPG content fallback.
 - JavaScript syntax checks, `cargo fmt --check`, strict Clippy, and the release build (with path remapping) passed.
 - Startup smoke testing passed on the release build. Comparing the checkout before and after startup found no newly created files there.
@@ -14,8 +14,10 @@ These were run on the revision that added concurrent listing, incremental UI upd
 
 Not repeated for this revision:
 
-- **No live scan was run.** The larger listing page sizes and concurrent folder reads have not been observed against the real service. Their fallback (step down to the service default, which is the request ChatGPT's own client sends) is covered by unit tests only. The scan-complete status line reports pages and seconds so the effect can be seen on a real Library.
-- No live Trash or restore was performed. The mutation script and its sequencing are unchanged; only how results are published to the interface changed.
+- **No live scan was run by the developer of this revision.** The larger listing page sizes and concurrent folder reads have not been observed directly against the real service. Their fallback (step down to the service default, which is the request ChatGPT's own client sends) is covered by unit tests only. The scan-complete status line reports pages and seconds so the effect can be seen on a real Library.
+- **The direct Trash lookup has not been observed against the real service.** ChatGPT's own client sends the ID filter (`allowlist_ids`) and the name search (`q`) in the same listing request it uses for Trash, but whether they are honoured together with `trashed_only` is unconfirmed. If they are not, the script learns that on the first file and reads the complete Trash listing as it did before; the mocked harness asserts that this fallback then costs exactly the same requests as the previous revision.
+- No live Trash or restore was performed for this revision. The one mutation per file and its sequencing are unchanged; the confirmation reads after it were reordered and extended as described above.
+
 - The privacy audit of local Git objects and the release executable described below was performed on an earlier revision and has not been repeated.
 
 These results describe the tested revision. Re-run checks after changes; they are not a guarantee about future service responses or later additions to the repository.
@@ -30,6 +32,7 @@ Rust unit tests cover:
 - Classifying listing replies (rejected sign-in, refusal, no answer) before they reach the inventory, and equivalence of slim and full listing rows.
 - Rebuilding listing URLs without inherited search/type/size filters and rejecting unrelated hosts.
 - Mutation eligibility, blocked-file isolation, stopping a sequential batch, FIFO batch promotion, duplicate reservations, and queue limits.
+- Merging of Trash lookup hints, and assembly of the mutation script: each placeholder appears once, a hostile file name stays inside its JSON string, and no permanent or batch delete is requested.
 - Account-change invalidation of pending Trash requests and cached rows.
 - Diagnostic schema redaction, bounded structural output, and CSV formula protection.
 - Validation of the browser-pane rectangle and of IDs placed into ChatGPT URLs.
@@ -40,6 +43,8 @@ The [Node regression harness](tests/preflight.cjs) executes production script te
 
 - Legacy null timestamps and changed identity, ownership, filename, size, folder, or content version.
 - Missing normal-node lookup after trashing, delayed Trash visibility, and issuing only one mutation.
+- Confirming a move with one filtered Trash request regardless of Trash size; learning which filter works; polling a proven lookup while the listing lags; dropping refused or ignored filters; and paying exactly the previous cost once both are known not to work.
+- Rejecting a filtered Trash result stamped before the request, a rejected request reported as a failure, an invisible result reported as uncertain even when every shortcut is claimed to work, and a failed pre-check reported as "nothing was sent".
 - Restoring a file beyond the first 5,000 Trash entries; rejecting missing/repeated cursors and exhausted pagination limits.
 - The listing fetch: retrying only throttling/gateway statuses with backoff and a retry cap, reducing items to the parsed fields without inventing a cursor, passing unexpected shapes and non-JSON error pages through with their status, and the response size limit.
 - Hover dismissal, late responses, cached re-entry, scroll dismissal, bounded retries, and dismissal when the table is rebuilt.

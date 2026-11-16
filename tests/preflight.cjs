@@ -3,6 +3,7 @@
  * Executes the production function/script text in isolated VM contexts with mock
  * fetch/DOM/image implementations. It never signs in or changes cloud files.
  * Rust format! escapes are unwrapped when extracting embedded browser scripts;
+ * the mutation script is read from src/changes.js and assembled as changes.rs does;
  * UI logic is taken from the "#region" blocks in src/inventory.js and src/thumbnails.js.
  * Update these extraction points if that code moves.
  * Mock image tests cover fallback/control flow, not native WebView codec behavior.
@@ -33,38 +34,143 @@ assert.equal(check(scanned,{...current,access_kind:'shared'}),'ownership');
 assert.equal(check(scanned,{...current,id:'libfile_different'}),'identity');
 console.log('9 preflight regression checks passed.');
 
-// Execute the actual embedded mutation script against a simulated service.
+// Execute the actual mutation script (src/changes.js) against a simulated service.
+/** Assemble the script the way changes.rs does: preflight first, request data last. */
+const changeScript=args=>source('changes.js').replace('__PREFLIGHT__',()=>source('preflight.js')).replace('__ARGS__',()=>JSON.stringify(args));
+/**
+ * A Library with a Trash listing of 50-item pages. Options describe how the service behaves:
+ * whether Trash honours an ID or name filter, what a trashed file's own node returns, how
+ * many Trash reads pass before a new entry becomes visible, and how many other files sit in
+ * Trash ahead of it. `state` counts every kind of request so cost can be asserted.
+ */
+function libraryService(options={}){
+ const opt={supportsId:false,supportsName:false,refuseId:false,nodeAfter:'missing',visibleAfter:0,deleteStatus:200,deleteWorks:true,others:0,staleStamp:false,startTrashed:false,...options};
+ const state={mutations:0,node:0,by_id:0,by_name:0,walk:0};
+ let trashed=opt.startTrashed,stamp=opt.startTrashed?'2026-11-01T00:00:00Z':null,trashReads=0;
+ const others=Array.from({length:opt.others},(_,i)=>({id:'libfile_other_'+i,name:'other-'+i+'.png',trashed_at:'2026-01-01T00:00:00Z'}));
+ const entry=()=>({...current,trashed_at:stamp});
+ const reply=(status,body)=>({status,json:async()=>body});
+ const fetch=async(url,request={})=>{
+  const method=request.method||'GET';
+  assert.equal(request.headers.Authorization,'test');
+  if(method==='DELETE'){
+   state.mutations++;assert.match(url,/soft_delete=true/,'Only a soft delete is ever requested');
+   if(opt.deleteWorks){trashed=true;stamp=opt.staleStamp?'2020-01-01T00:00:00Z':new Date().toISOString();trashReads=0;}
+   return reply(opt.deleteStatus,{});
+  }
+  if(url.endsWith('/restore')){assert.equal(method,'POST');state.mutations++;trashed=false;stamp=null;return reply(200,{});}
+  if(method==='POST'){
+   const q=JSON.parse(request.body);
+   assert.equal(q.limit,50);assert.equal(q.trashed_only,true);assert.equal(q.include_hidden_files,true);
+   const kind=q.allowlist_ids?'by_id':q.q!==undefined?'by_name':'walk';state[kind]++;
+   const visible=trashed&&(opt.startTrashed||trashReads++>=opt.visibleAfter);
+   const listing=visible?[...others,entry()]:others;
+   const page=i=>({items:listing.slice(i*50,i*50+50),cursor:(i+1)*50<listing.length?String(i+1):null});
+   if(kind==='by_id'){
+    assert.deepEqual(q.allowlist_ids,[scanned.id]);
+    if(opt.refuseId)return reply(422,{detail:'unknown field'});
+    return reply(200,opt.supportsId?{items:visible?[entry()]:[],cursor:null}:page(0));
+   }
+   if(kind==='by_name'){
+    assert.equal(q.q,scanned.name);
+    return reply(200,opt.supportsName?{items:visible?[entry()]:[],cursor:null}:page(0));
+   }
+   return reply(200,page(q.cursor===null?0:Number(q.cursor)));
+  }
+  state.node++;
+  if(!trashed)return reply(200,state.mutations&&opt.startTrashed?{...current,trashed_at:null}:current);
+  return opt.nodeAfter==='trashed'?reply(200,entry()):reply(404,{});
+ };
+ return {fetch,state};
+}
+async function change(action,options,lookup){
+ const service=libraryService(options);
+ const script=changeScript({file:scanned,action,authorization:'test',lookup});
+ const result=await vm.runInNewContext(script,{location:{origin:'https://chatgpt.com'},URLSearchParams,AbortSignal,setTimeout:fn=>fn(),fetch:service.fetch});
+ return {result,...service.state};
+}
 (async()=>{
-const script=embedded('changes.rs').replace('{args}',JSON.stringify({file:scanned,action:'trash',authorization:'test'})).replace('{preflight}',source('preflight.js'));
-for(const delayed of [false,true]){
- let mutations=0,reads=0;
- const result=await vm.runInNewContext(script,{location:{origin:'https://chatgpt.com'},URLSearchParams,AbortSignal,setTimeout:fn=>fn(),fetch:async(url,options)=>{
-  let status=200,body;
-  if(options.method==='DELETE'){mutations++;body={};}
-  else if(options.method==='POST'){assert.equal(JSON.parse(options.body).limit,50);reads++;body={items:delayed&&reads===1?[]:[{...current,trashed_at:'2026-11-14T21:43:00Z'}],cursor:null};}
-  else if(mutations){status=404;body={};}else body=current;
-  return {status,json:async()=>body};
- }});
- assert.equal(result.status,'verified');assert.equal(mutations,1,'Never repeat the mutation');assert.equal(reads,delayed?2:1);
-}
-const restoreScript=script.replace('"action":"trash"','"action":"restore"');
-for(const mode of ['large','missing-cursor','repeated-cursor','exhausted']){
- let reads=0,mutations=0;
- const result=await vm.runInNewContext(restoreScript,{location:{origin:'https://chatgpt.com'},URLSearchParams,AbortSignal,setTimeout:fn=>fn(),fetch:async(url,options)=>{
-  let body,status=200;
-  if(url.endsWith('/restore')){mutations++;body={};}
-  else if(options.method==='POST'){
-   reads++;const matched=mode==='large'&&reads===101;
-   body={items:matched?[{...current,trashed_at:'2026-11-14T21:43:00Z'}]:Array.from({length:50},(_,i)=>({id:'libfile_other_'+reads+'_'+i})),cursor:matched?null:(mode==='repeated-cursor'?'same':String(reads))};
-   if(mode==='missing-cursor')delete body.cursor;
-  }else body={...current,trashed_at:null};
-  return {status,json:async()=>body};
- }});
- if(mode==='large'){assert.equal(result.status,'verified');assert.equal(reads,101);assert.equal(mutations,1);}
- else {assert.equal(result.status,'failed');assert.equal(mutations,0);if(mode==='exhausted'){assert.equal(reads,1000);assert.match(result.message,/exceeded 1,000/);}}
-}
-console.log('Large Trash restore and malformed/repeated/exhausted pagination checks passed.');
-console.log('Trash verification checks passed: missing node, supported page size, delayed visibility, single mutation.');
+ const hints=o=>JSON.parse(JSON.stringify(o));
+ // The measured situation: a trashed file's node is gone and Trash is large. With an ID
+ // filter the file is confirmed in one Trash request instead of one per 50 trashed files.
+ let r=await change('trash',{supportsId:true,others:5000});
+ assert.equal(r.result.status,'verified');assert.equal(r.mutations,1);
+ assert.deepEqual([r.node,r.by_id,r.by_name,r.walk],[2,1,0,0],'First file: node read, then one filtered Trash request');
+ assert.deepEqual(hints(r.result.lookup),{by_id:true,by_name:null,node:false});
+ assert.equal(r.result.node.id,scanned.id);
+ // What it learned makes the next file cost three requests however large Trash is.
+ r=await change('trash',{supportsId:true,others:5000},{by_id:true,by_name:null,node:false});
+ assert.equal(r.result.status,'verified');assert.equal(r.mutations,1);
+ assert.deepEqual([r.node,r.by_id,r.by_name,r.walk],[1,1,0,0],'Later files: preflight, one mutation, one Trash request');
+ // The listing can lag behind the request: a proven lookup is polled, not abandoned.
+ r=await change('trash',{supportsId:true,others:5000,visibleAfter:2},{by_id:true,by_name:null,node:false});
+ assert.equal(r.result.status,'verified');assert.deepEqual([r.by_id,r.walk,r.mutations],[3,0,1]);
+ // A refused filter is dropped at once and the other one is used.
+ r=await change('trash',{refuseId:true,supportsName:true,others:200});
+ assert.equal(r.result.status,'verified');assert.deepEqual([r.by_id,r.by_name,r.walk,r.mutations],[1,1,0,1]);
+ assert.deepEqual(hints(r.result.lookup),{by_id:false,by_name:true,node:false});
+ // Filters the service ignores: the full listing still confirms the file (page 3 of Trash),
+ // and both lookups are recorded as unusable...
+ r=await change('trash',{others:120});
+ assert.equal(r.result.status,'verified');assert.equal(r.mutations,1);assert.equal(r.walk,3);
+ assert.deepEqual(hints(r.result.lookup),{by_id:false,by_name:false,node:false});
+ assert.equal(r.by_id,1,'An ID filter that returns other files is recognised as ignored');
+ // ...so later files pay exactly what they did before this optimisation existed.
+ r=await change('trash',{others:120},{by_id:false,by_name:false,node:false});
+ assert.equal(r.result.status,'verified');
+ assert.deepEqual([r.node,r.by_id,r.by_name,r.walk,r.mutations],[2,0,0,3,1],'No extra requests once a lookup is known not to work');
+ // Delayed visibility with only the full listing available: readback is retried, the mutation is not.
+ r=await change('trash',{visibleAfter:1},{by_id:false,by_name:false,node:false});
+ assert.equal(r.result.status,'verified');assert.deepEqual([r.walk,r.mutations],[2,1]);
+ // A quick result stamped before this request is not evidence that this request worked.
+ r=await change('trash',{supportsId:true,staleStamp:true});
+ assert.equal(r.result.status,'verified','The full listing remains the standard of proof');
+ assert(r.walk>=1,'Stale quick evidence must fall through to the full listing');
+ assert.equal(r.result.lookup.by_id,false);assert.equal(r.mutations,1);
+ // Where the node itself shows the trashed state, no Trash request is needed at all.
+ r=await change('trash',{nodeAfter:'trashed',others:5000});
+ assert.equal(r.result.status,'verified');assert.deepEqual([r.node,r.by_id,r.by_name,r.walk,r.mutations],[2,0,0,0,1]);
+ assert.equal(r.result.lookup.node,true);
+ // Outcomes other than success are unchanged: a rejected request is a failure...
+ r=await change('trash',{supportsId:true,supportsName:true,deleteWorks:false,deleteStatus:403});
+ assert.equal(r.result.status,'failed');assert.match(r.result.message,/Service rejected the change \(HTTP 403\)/);assert.equal(r.mutations,1);
+ // ...and a request whose effect cannot be seen anywhere stays uncertain, never retried.
+ r=await change('trash',{supportsId:true,visibleAfter:Infinity});
+ assert.equal(r.result.status,'uncertain');assert.match(r.result.message,/could not be verified \(HTTP 200\)/);assert.equal(r.mutations,1);
+ // Hints cannot manufacture a success: with every shortcut claimed to work, nothing visible is still uncertain.
+ r=await change('trash',{visibleAfter:Infinity},{by_id:true,by_name:true,node:true});
+ assert.equal(r.result.status,'uncertain');assert.equal(r.mutations,1);
+ // A file that cannot be read beforehand is a plain failure: nothing was sent.
+ const offline=await vm.runInNewContext(changeScript({file:scanned,action:'trash',authorization:'test'}),{location:{origin:'https://chatgpt.com'},URLSearchParams,AbortSignal,setTimeout:fn=>fn(),fetch:async()=>{throw Error('offline')}});
+ assert.equal(offline.status,'failed');assert.match(offline.message,/Nothing was sent/);
+ console.log('Trash verification checks passed: one-request lookup, learned hints, lag, refused/ignored filters, stale evidence, single mutation.');
+
+ // Restore: the file is located in Trash with one request where a filter works.
+ r=await change('restore',{supportsId:true,startTrashed:true,others:5000});
+ assert.equal(r.result.status,'verified');assert.deepEqual([r.by_id,r.walk,r.mutations],[1,0,1]);
+ // Without a usable filter, restore still reads Trash to the end; failures there send nothing.
+ const restoreScript=changeScript({file:scanned,action:'restore',authorization:'test'});
+ for(const mode of ['large','missing-cursor','repeated-cursor','exhausted']){
+  let reads=0,mutations=0;
+  const result=await vm.runInNewContext(restoreScript,{location:{origin:'https://chatgpt.com'},URLSearchParams,AbortSignal,setTimeout:fn=>fn(),fetch:async(url,options)=>{
+   let body,status=200;
+   if(url.endsWith('/restore')){mutations++;body={};}
+   else if(options.method==='POST'){
+    const q=JSON.parse(options.body);assert.equal(q.limit,50);
+    // This service ignores the ID and name filters and answers with an ordinary page.
+    if(q.allowlist_ids||q.q!==undefined)body={items:Array.from({length:50},(_,i)=>({id:'libfile_unrelated_'+i})),cursor:'more'};
+    else {
+     reads++;const matched=mode==='large'&&reads===101;
+     body={items:matched?[{...current,trashed_at:'2026-11-14T21:43:00Z'}]:Array.from({length:50},(_,i)=>({id:'libfile_other_'+reads+'_'+i})),cursor:matched?null:(mode==='repeated-cursor'?'same':String(reads))};
+     if(mode==='missing-cursor')delete body.cursor;
+    }
+   }else body={...current,trashed_at:null};
+   return {status,json:async()=>body};
+  }});
+  if(mode==='large'){assert.equal(result.status,'verified');assert.equal(reads,101);assert.equal(mutations,1);assert.deepEqual(hints(result.lookup),{by_id:false,by_name:false,node:null});}
+  else {assert.equal(result.status,'failed');assert.equal(mutations,0);if(mode==='exhausted'){assert.equal(reads,1000);assert.match(result.message,/exceeded 1,000/);}}
+ }
+ console.log('Restore checks passed: one-request lookup, large Trash, malformed/repeated/exhausted pagination.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 
 // Execute the actual listing fetch: bounded retry, slim rows, and preserved validation shape.

@@ -52,6 +52,7 @@ function pumpPreviews() {
     send('thumbnail:' + JSON.stringify({id: p.id, modified: p.modified, epoch: previewEpoch}));
   }
 }
+/** Every drawn thumbnail box for one file revision. */
 const visualsFor = key => [...document.querySelectorAll('.file-visual')].filter(el => el.dataset.key === key);
 /** Handle native results. A busy or interrupted load is retried a bounded number of times
  * instead of being cached as unavailable; a real failure is cached until refresh.

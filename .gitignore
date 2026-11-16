@@ -27,3 +27,6 @@ Thumbs.db
 
 # Local Windows launchers contain machine-specific installation paths.
 *.lnk
+
+# Local tool settings and session worktrees contain machine-specific paths.
+/.claude/

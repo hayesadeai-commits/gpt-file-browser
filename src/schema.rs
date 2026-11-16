@@ -8,7 +8,9 @@ use serde::Serialize;
 use serde_json::Value;
 use url::Url;
 
+/// Most response structures kept for one diagnostic report.
 pub const LIMIT: usize = 150;
+/// Largest response body that is read for inspection.
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]

@@ -37,7 +37,9 @@ use wry::{
     dpi::{LogicalPosition, LogicalSize},
 };
 
+/// Handle that browser callbacks use to post events back to the main loop.
 type Proxy = EventLoopProxy<AppEvent>;
+/// A listing snapshot keyed by stable file ID, so the published order is deterministic.
 type Rows = BTreeMap<String, inventory::FileRow>;
 
 /// Messages crossing from shell IPC or asynchronous browser callbacks into the
@@ -67,10 +69,12 @@ const SCAN_CONCURRENCY: usize = 6;
 /// Outstanding image loads across thumbnails and hover previews, including old epochs.
 const PREVIEW_LIMIT: usize = 10;
 
+// The only pages the app itself navigates to, and the storage-quota endpoint it reads.
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/files/library/storage/usage";
 const SPACE_URL: &str = "https://chatgpt.com/space?tab=all";
 const HOME_URL: &str = "https://chatgpt.com/";
 
+// Status-line texts. Kept together so the wording stays consistent across handlers.
 const MSG_BUSY: &str = "Wait for the current operation to finish.";
 const MSG_CONNECTING: &str =
     "Connecting to your signed-in Library. If this stalls, open ChatGPT and sign in.";
@@ -92,12 +96,14 @@ struct Note {
     text: String,
     alert: bool,
 }
+/// A routine progress or completion message.
 fn info(text: impl Into<String>) -> Option<Note> {
     Some(Note {
         text: text.into(),
         alert: false,
     })
 }
+/// A refusal or failure, shown in the warning color.
 fn alert(text: impl Into<String>) -> Option<Note> {
     Some(Note {
         text: text.into(),
@@ -139,6 +145,7 @@ struct Scan {
 }
 
 impl Scan {
+    /// Listing pages requested but not yet answered (the usage request is not counted).
     fn pages_in_flight(&self) -> usize {
         self.pending
             .values()
@@ -246,6 +253,7 @@ impl Scan {
         self.halt(error);
         self.size = self.proven.unwrap_or(0);
     }
+    /// Files in the snapshot, excluding folders.
     fn file_count(&self) -> usize {
         self.inv.rows.values().filter(|r| !r.folder).count()
     }
@@ -316,9 +324,11 @@ fn call(shell: &wry::WebView, function: &str, data: &Value) {
     let _ = shell.evaluate_script(&format!("window.{function}({data})"));
 }
 
+/// Listing flags sent with every Files update: running, complete, error, pages read.
 fn files_state(scan: &Scan) -> Value {
     json!({"busy": scan.running, "complete": scan.inv.complete, "error": scan.inv.error, "pages": scan.inv.pages})
 }
+/// Listing flags sent with every Trash update.
 fn trash_state(trash: &Trash) -> Value {
     json!({"busy": trash.busy, "complete": trash.complete, "error": trash.error})
 }
@@ -332,9 +342,11 @@ fn publish_view(shell: &wry::WebView, function: &str, rows: &Rows, state: Value)
         "window.{function}(Object.assign({state},{{rows:{rows}}}))"
     ));
 }
+/// Send the complete Files snapshot and its listing flags to the shell.
 fn publish_inventory(shell: &wry::WebView, scan: &Scan) {
     publish_view(shell, "showInventory", &scan.inv.rows, files_state(scan));
 }
+/// Send the complete Trash snapshot and its listing flags to the shell.
 fn publish_trash(shell: &wry::WebView, trash: &Trash) {
     publish_view(shell, "showTrash", &trash.rows, trash_state(trash));
 }
@@ -425,6 +437,7 @@ struct Batches {
 }
 
 impl Batches {
+    /// Whether a file's mutation or verification is in flight right now.
     fn busy(&self) -> bool {
         self.job.as_ref().is_some_and(|j| j.current.is_some())
     }
@@ -463,6 +476,7 @@ impl Batches {
         }
         Ok(())
     }
+    /// Send the current reservations and the active job's progress to the shell.
     fn publish(&mut self, shell: &wry::WebView) {
         publish_queue(shell, self.job.as_ref(), &self.waiting);
         if let Some(j) = &self.job {
@@ -562,6 +576,7 @@ fn shell_html() -> String {
         )
 }
 
+/// Milliseconds since the Unix epoch; the basis for review nonces.
 fn now_millis() -> Option<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

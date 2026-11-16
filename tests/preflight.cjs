@@ -91,8 +91,8 @@ async function change(action,options,lookup){
 }
 (async()=>{
  const hints=o=>JSON.parse(JSON.stringify(o));
- // The measured situation: a trashed file's node is gone and Trash is large. With an ID
- // filter the file is confirmed in one Trash request instead of one per 50 trashed files.
+ // A trashed file's node is gone and Trash is large. With an ID filter the file is
+ // confirmed in one Trash request instead of one per 50 trashed files.
  let r=await change('trash',{supportsId:true,others:5000});
  assert.equal(r.result.status,'verified');assert.equal(r.mutations,1);
  assert.deepEqual([r.node,r.by_id,r.by_name,r.walk],[2,1,0,0],'First file: node read, then one filtered Trash request');
@@ -115,7 +115,7 @@ async function change(action,options,lookup){
  assert.equal(r.result.status,'verified');assert.equal(r.mutations,1);assert.equal(r.walk,3);
  assert.deepEqual(hints(r.result.lookup),{by_id:false,by_name:false,node:false});
  assert.equal(r.by_id,1,'An ID filter that returns other files is recognised as ignored');
- // ...so later files pay exactly what they did before this optimisation existed.
+ // ...so later files send no filtered requests: only the node read and the full listing.
  r=await change('trash',{others:120},{by_id:false,by_name:false,node:false});
  assert.equal(r.result.status,'verified');
  assert.deepEqual([r.node,r.by_id,r.by_name,r.walk,r.mutations],[2,0,0,3,1],'No extra requests once a lookup is known not to work');

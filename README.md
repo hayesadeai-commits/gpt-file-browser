@@ -4,7 +4,7 @@ A Windows desktop file manager for your ChatGPT Library, built in Rust. No Chrom
 
 ## Open and use
 
-Double-click **GPT File Browser.exe** in a local checkout if a release executable has been placed there, or run `gpt-file-browser.exe` from your installation folder. The executable is excluded from Git. Every copy uses the same private data folder, `%LOCALAPPDATA%\GPTStorageBrowser`; moving the executable does not move the saved session. The private folder retains its `GPTStorageBrowser` name for compatibility with existing sessions.
+Double-click **GPT File Browser.exe** in a local checkout if a release executable has been placed there, or run `gpt-file-browser.exe` from your installation folder. The executable is excluded from Git. Every copy uses the same private data folder, `%LOCALAPPDATA%\GPTStorageBrowser`; moving the executable does not move the saved session.
 
 1. Click **Scan all files**. If sign-in is needed, open **Browser** in the sidebar, complete sign-in and 2FA yourself, then scan again. The app retains your sign-in across launches. **Stop** replaces the button while a scan runs; afterwards it becomes **Refresh**.
 2. Click **Name**, **Modified**, or **Size** to sort the entire collection. Results are displayed 100 at a time, but sorting and search cover every indexed file.
@@ -26,7 +26,7 @@ The sidebar shows how much of your ChatGPT storage is used once a scan has conne
 - Small image thumbnails beside file names, and a type glyph for other files. Hover over a thumbnail for an enlarged image pop-out; moving away dismisses it without navigation. Clicking the file name still opens ChatGPT.
 - The app-managed thumbnail and hover caches stay in memory; normal WebView2 browser data is kept in the private profile folder. Thumbnails fall back to original content when a thumbnail fails. Original-content previews fetch up to 32 MiB, fit the window, and cap decoded output at 2048 pixels per side; four enlarged previews are cached. Unsupported or oversized images show an unavailable message.
 - Reviewed, queued bulk Trash and restore for owned ordinary Library files. Manage Pages, Sites, folders and shared items in ChatGPT's native interface.
-- Fast confirmation of each move: once a file's own metadata no longer answers, the app asks the Trash listing for that one file (by ID, then by name) instead of reading all of Trash, which used to cost one request per 50 trashed files for every file processed. Whether ChatGPT honours those filters is learned on the first file and remembered for the rest of the session; if it does not, the complete Trash listing is read as before. A lookup result only counts if the Trash entry was stamped by that request.
+- Fast confirmation of each move: once a file's own metadata no longer answers, the app asks the Trash listing for that one file (by ID, then by name) instead of reading all of Trash, which costs one request per 50 trashed files. Whether ChatGPT honours those filters is learned on the first file and remembered for the rest of the session; if it does not, the complete Trash listing is read instead. A lookup result only counts if the Trash entry was stamped by that request.
 - Per-file verification and action receipts. An uncertain or failed result stops the remaining files in that batch and cancels waiting batches. Unprocessed rows return to the list; the affected file remains blocked until refresh. No permanent-delete command.
 
 Refresh if the collection changed elsewhere. Before changes, the app checks identity, ownership, name, parent, size, available timestamp and current Trash state. Failed scans remain visibly incomplete; bulk changes require an initial completed scan. Verified changes update the inventory, so another batch does not require rescanning. A failed or uncertain action blocks only that file until refresh; unaffected files remain available for a new reviewed batch. Queued work is not automatically resumed after closing the app or changing sign-in context. ChatGPT navigation and scanning are paused during processing so they cannot interrupt an active request. While files are being listed, the **ChatGPT**, **Library**, and **Reload** buttons and opening a file are paused for the same reason; stop the scan to browse. Quota usage can update separately from file visibility.
@@ -40,8 +40,6 @@ The app stores its profiles and generated reports under `%LOCALAPPDATA%\GPTStora
 - `reports/`: exported metadata, diagnostic reports, and action receipts.
 
 These files may contain credentials, filenames, and account identifiers. Keep them private. Chrome's profile is not imported or modified. If `LOCALAPPDATA` is missing or relative, startup fails instead of falling back to the project directory. Files saved through ChatGPT's native Download dialog go to the destination you choose.
-
-Older installations that stored data beside the executable require a one-time migration of their `app-data` and `reports` directories into this private folder while the app is closed. Startup does not automatically search for or import an older profile.
 
 The app learns the Library request context from the signed-in page. Session headers remain in memory and are sent only to ChatGPT. A changed sign-in context invalidates completed scans and pending reviews. Credentials are excluded from CSV, action receipts and diagnostics.
 

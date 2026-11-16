@@ -51,6 +51,7 @@ function prepare(row) {
 
 /** Changing the visible page must not limit selection, filtering, or sorting to that page. */
 const PAGE_SIZE = 100;
+/** One view's rows by ID, a change counter, and the listing flags Rust reports for it. */
 const makeStore = () => ({rows: new Map(), version: 0, busy: false, complete: false, error: null, pages: 0});
 /** Files and Trash keep separate snapshots; `version` changes whenever a store's rows change. */
 const stores = {files: makeStore(), trash: makeStore()};
@@ -96,6 +97,7 @@ function selectRange(files, id, checked, shift) {
 
 // #region filter
 const nameOrder = new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'});
+/** Fixed order by stable ID, used to break ties. */
 const idOrder = (a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 /** Unknown values stay last and the stable ID breaks ties, so pagination is deterministic. */
 function compareRows(a, b) {
@@ -147,8 +149,8 @@ function filteredFiles() {
 }
 // #endregion filter
 
-/** thumbnails.js registers here instead of wrapping renderFiles: `before` runs ahead of
- * a table rebuild, `row` receives each new thumbnail box, `after` runs once rows exist. */
+/** Table render hooks, registered by thumbnails.js: `before` runs ahead of a table
+ * rebuild, `row` receives each new thumbnail box, `after` runs once rows exist. */
 const renderHooks = {before: [], row: [], after: []};
 
 /** Reference a glyph from the sprite in ui.html: "i" for interface icons, "k" for file kinds. */
@@ -159,6 +161,7 @@ const icon = (name, set = 'i') => {
   svg.firstChild.setAttribute('href', `#${set}-${name}`);
   return svg;
 };
+/** The modified time in the system locale, or "Unknown" when the service gave none. */
 const whenText = f => f._time == null ? 'Unknown' : new Date(f._time).toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'});
 
 /** One table row. Text enters through textContent; events are delegated to the tbody. */
@@ -388,6 +391,7 @@ function updateActions(count) {
 // while a listing is running, and immediately once it settles.
 const RENDER_INTERVAL = 200;
 let renderTimer = null, lastRender = 0;
+/** Schedule one redraw, coalescing every update that arrives before it runs. */
 function requestRender() {
   const busy = stores[viewMode].busy;
   if (renderTimer !== null) {
@@ -414,9 +418,11 @@ function storeChanged(view) {
   }
   requestRender();
 }
+/** Copy whichever listing flags an update carries; row-only updates carry none. */
 function applyState(store, data) {
   for (const key of ['busy', 'complete', 'error', 'pages']) if (key in data) store[key] = data[key];
 }
+/** Replace one view's rows with a full snapshot from Rust. */
 function replaceStore(view, data) {
   const store = stores[view];
   store.rows = new Map(data.rows.map(row => [row.id, prepare(row)]));
@@ -479,6 +485,7 @@ window.selectBrowser = () => showSection('browser');
 // The native ChatGPT view is positioned over this element. Report its rectangle whenever
 // the layout changes; sections stay laid out while hidden, so it is always measurable.
 const browserHost = $('browser-host');
+/** Send the pane's rectangle in CSS pixels, which are the window's logical pixels. */
 function reportBrowserBounds() {
   const r = browserHost.getBoundingClientRect();
   if (r.width > 0 && r.height > 0) send('bounds:' + JSON.stringify([r.left, r.top, r.width, r.height]));
@@ -500,6 +507,7 @@ function sortBy(key) {
   tablePage = 0;
   renderFiles();
 }
+/** Move to the previous or next page of the filtered list and return to its top. */
 function changePage(step) {
   tablePage += step;
   renderFiles();
@@ -660,6 +668,7 @@ window.showJob = data => {
     updateActions();
   }
 };
+/** Draw the progress strip from the latest totals: summary text, bar, and controls. */
 function paintJob() {
   if (!job) return;
   const trash = job.action === 'trash', done = job.verified + job.attention + job.skipped, total = done + job.remaining;

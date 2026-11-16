@@ -19,6 +19,7 @@
   const base = '/backend-api/files/library/files/' + encodeURIComponent(f.id);
   const headers = {Authorization: a.authorization};
   if (a.account) headers['ChatGPT-Account-ID'] = a.account;
+  /** One authenticated request with a 30-second limit. A non-JSON body is returned as null. */
   async function req(url, method = 'GET', body) {
     const h = {...headers};
     if (body) h['Content-Type'] = 'application/json';

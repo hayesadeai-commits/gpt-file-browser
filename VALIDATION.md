@@ -1,24 +1,21 @@
 # Validation
 
-Documentation reviewed against the current source on November 15, 2026. This file contains no account inventories, personal filenames, file IDs, or machine-specific paths.
+Documentation reviewed against the current source on November 16, 2026. This file contains no account inventories, personal filenames, file IDs, or machine-specific paths.
 
 ## Latest recorded checks
-
-These were run on the revision that added direct Trash lookups for confirming a move (on top of concurrent listing, incremental UI updates, and the redesigned interface):
 
 - 35 Rust unit tests passed.
 - JavaScript regression groups passed: preflight comparisons, Trash verification and pagination, the listing fetch (bounded retry, backoff, slim rows), hover lifecycle/retry behavior, Shift-click ranges, queue visibility with whole-collection filtering/sorting/caching, size and file-kind formatting, and JPG content fallback.
 - JavaScript syntax checks, `cargo fmt --check`, strict Clippy, and the release build (with path remapping) passed.
 - Startup smoke testing passed on the release build. Comparing the checkout before and after startup found no newly created files there.
 - The interface was reviewed in a Chromium preview that loads the production markup, stylesheet, and scripts with a mock native bridge and synthetic file data. States covered: empty, scanning, listed, selection, review dialogs for Trash and restore, running/finished/failed batches, Trash, the browser toolbar, and diagnostics, in light and dark themes at 1280x720 and at the 980x680 minimum window size.
+- Privacy audit of everything Git holds: every version of every file in every commit, together with commit messages, authors, and dates, was searched for user and machine names, user-profile and absolute paths, email addresses, tokens, keys, cookies, signed URLs, account-style IDs, and IP addresses. The same content was compared with a private inventory export for real file IDs, names, sizes, and timestamps. None are present. Release executables built with the documented path remapping were searched for the user, machine, and checkout names; none were present.
 
-Not repeated for this revision:
+Not verified against the live service in a recorded test:
 
-- **No live scan was run by the developer of this revision.** The larger listing page sizes and concurrent folder reads have not been observed directly against the real service. Their fallback (step down to the service default, which is the request ChatGPT's own client sends) is covered by unit tests only. The scan-complete status line reports pages and seconds so the effect can be seen on a real Library.
-- **The direct Trash lookup has not been observed against the real service.** ChatGPT's own client sends the ID filter (`allowlist_ids`) and the name search (`q`) in the same listing request it uses for Trash, but whether they are honoured together with `trashed_only` is unconfirmed. If they are not, the script learns that on the first file and reads the complete Trash listing as it did before; the mocked harness asserts that this fallback then costs exactly the same requests as the previous revision.
-- No live Trash or restore was performed for this revision. The one mutation per file and its sequencing are unchanged; the confirmation reads after it were reordered and extended as described above.
-
-- The privacy audit of local Git objects and the release executable described below was performed on an earlier revision and has not been repeated.
+- The larger listing page sizes and concurrent folder reads. Their fallback (step down to the service default, which is the request ChatGPT's own client sends) is covered by unit tests only. The scan-complete status line reports pages and seconds so the effect can be seen on a real Library.
+- The direct Trash lookup. ChatGPT's own client sends the ID filter (`allowlist_ids`) and the name search (`q`) in the same listing request it uses for Trash, but whether they are honoured together with `trashed_only` is unconfirmed. If they are not, the script learns that on the first file and reads the complete Trash listing instead; the mocked harness asserts that it then sends no filtered requests at all.
+- Trash and restore with the current confirmation reads. Each file still gets exactly one mutation, in the same sequence.
 
 These results describe the tested revision. Re-run checks after changes; they are not a guarantee about future service responses or later additions to the repository.
 
@@ -43,7 +40,7 @@ The [Node regression harness](tests/preflight.cjs) executes production script te
 
 - Legacy null timestamps and changed identity, ownership, filename, size, folder, or content version.
 - Missing normal-node lookup after trashing, delayed Trash visibility, and issuing only one mutation.
-- Confirming a move with one filtered Trash request regardless of Trash size; learning which filter works; polling a proven lookup while the listing lags; dropping refused or ignored filters; and paying exactly the previous cost once both are known not to work.
+- Confirming a move with one filtered Trash request regardless of Trash size; learning which filter works; polling a proven lookup while the listing lags; dropping refused or ignored filters; and sending no filtered requests once both are known not to work.
 - Rejecting a filtered Trash result stamped before the request, a rejected request reported as a failure, an invisible result reported as uncertain even when every shortcut is claimed to work, and a failed pre-check reported as "nothing was sent".
 - Restoring a file beyond the first 5,000 Trash entries; rejecting missing/repeated cursors and exhausted pagination limits.
 - The listing fetch: retrying only throttling/gateway statuses with backoff and a retry cap, reducing items to the parsed fields without inventing a cursor, passing unexpected shapes and non-JSON error pages through with their status, and the response size limit.
@@ -57,11 +54,11 @@ The image/DOM mocks test control flow, not native image codecs, real pointer geo
 
 ## Manual and integration evidence
 
-The following manual checks were made on earlier revisions and have not been repeated since the listing and interface changes: sign-in and persistence, complete inventory browsing, sorting/filtering, native preview/download cancellation, and a disposable-file Trash/restore round trip. An existing JPG was decoded through the real WebView loader. Hover event behavior is covered by the mocked regression harness rather than claimed as a complete visual test.
+The following manual checks were made on earlier revisions and have not been repeated for the current listing, interface, and confirmation code: sign-in and persistence, complete inventory browsing, sorting/filtering, native preview/download cancellation, and a disposable-file Trash/restore round trip. An existing JPG was decoded through the real WebView loader. Hover event behavior is covered by the mocked regression harness rather than claimed as a complete visual test.
 
-After moving runtime data to `%LOCALAPPDATA%\GPTStorageBrowser`, migration checks verified profile-file counts and lengths. Startup succeeded using that directory and did not create session/report files in the checkout. That startup test alone does not prove that a saved session remains authenticated.
+Startup uses `%LOCALAPPDATA%\GPTStorageBrowser` and does not create session or report files in the checkout. A startup test alone does not prove that a saved session remains authenticated.
 
-The GPT File Browser executable's Windows icon resource contains six sizes. The redesigned smiling folder icon was rendered and visually checked at 256 pixels; its silhouette reaches nearly to the canvas edges. Windows FileDescription, ProductName, and OriginalFilename fields were checked for the new name. Build-path remapping was checked in an earlier release executable for the tested local identifiers and checkout paths.
+The GPT File Browser executable's Windows icon resource contains six sizes. The smiling folder icon was rendered and visually checked at 256 pixels; its silhouette reaches nearly to the canvas edges. Windows FileDescription, ProductName, and OriginalFilename fields were checked for the product name.
 
 Live service behavior can change. Do not claim a real bulk-mutation test from mocked results; use an explicitly authorized disposable file for any future live mutation validation.
 

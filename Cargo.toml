@@ -1,0 +1,22 @@
+[package]
+name = "gpt-file-browser"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop file browser for ChatGPT storage"
+include = ["Cargo.toml", "Cargo.lock", "build.rs", "README.md", "VALIDATION.md", "src/**", "tests/**"]
+
+# WebView2 stays in-process; no external automation server or API key is required.
+[dependencies]
+wry = { version = "=0.57.2", default-features = false, features = ["os-webview"] }
+tao = { version = "=0.37.2", default-features = false, features = ["rwh_06"] }
+webview2-com = "=0.39.1"
+windows = { version = "=0.62.2", features = ["Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls_Dialogs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+
+# Keep distributed executables small and omit debug symbols.
+# Use the README path-remapping flag as well when preparing a shareable build.
+[profile.release]
+strip = true
+lto = "thin"

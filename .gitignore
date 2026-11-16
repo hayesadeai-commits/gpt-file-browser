@@ -1,0 +1,29 @@
+# Generated builds, runtime profiles, exports, and action receipts
+/target/
+/app-data/
+/reports/
+/work/
+*.exe
+*.pdb
+*.res
+*.ico
+# Local secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.sqlite
+*.sqlite3
+*.db
+# Editor/OS temporary files
+.vs/
+.idea/
+*.tmp
+*.log
+Thumbs.db
+.DS_Store
+
+# Local Windows launchers contain machine-specific installation paths.
+*.lnk

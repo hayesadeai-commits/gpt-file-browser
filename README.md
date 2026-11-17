@@ -126,6 +126,29 @@ The source ignore rules exclude local secrets, profiles, reports, binaries, and 
 
 Module/function comments explain these rules near their implementations. When changing embedded browser scripts, run both Rust and Node checks: the Node harness executes extracted production script text rather than a separately maintained copy. UI logic it runs is delimited by `// #region` markers in the two script files; keep those regions self-contained.
 
+## License and third-party notices
+
+GPT File Browser's original code is licensed under the [MIT License](LICENSE), copyright 2026 hayesadeai-commits. Third-party code retains its own licenses; the MIT grant does not replace them.
+
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists the Windows dependency graph and links to preserved license, copyright, and additional-notice texts, including the Microsoft WebView2 SDK loader and the Rust standard library. The separately installed WebView2 Runtime is not bundled with this project.
+
+When sharing an executable, include `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the complete `third-party/` directory alongside it. For a build produced by the commands above:
+
+```powershell
+$releaseDir = Join-Path $env:CARGO_TARGET_DIR 'release'
+Copy-Item -LiteralPath 'LICENSE', 'THIRD_PARTY_NOTICES.md' -Destination $releaseDir
+Copy-Item -LiteralPath 'third-party' -Destination $releaseDir -Recurse -Force
+```
+
+After changing dependencies or Rust toolchains, refresh and verify the bundle with Python 3:
+
+```powershell
+python scripts/generate_notices.py
+python scripts/generate_notices.py --check
+```
+
+The generator uses cached Cargo metadata and retrieves the pinned WebView2 license texts from their public upstream sources. It fails on missing notices, changed WebView2 provenance, or obsolete bundle files rather than silently omitting them. The bundled notices target `x86_64-pc-windows-msvc`; review/regenerate them for other targets.
+
 ## Feedback and forks
 
 Forks are welcome. This repository does not accept pull requests; pull request creation is disabled. Report reproducible bugs or request features through [GitHub Issues](https://github.com/hayesadeai-commits/gpt-file-browser/issues).

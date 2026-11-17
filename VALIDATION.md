@@ -75,3 +75,9 @@ Profiles, generated reports, and action receipts use `%LOCALAPPDATA%\GPTStorageB
 Keep browser profiles, exports, action receipts, live account diagnostics, shortcuts, and generated builds out of Git. Ignore rules protect future staging but do not remove information already committed; re-audit current files, staged content, history, and release binaries before publishing.
 
 Queued multi-batch behavior is covered by unit tests and mocked UI execution. No live cloud deletion was performed to validate this feature.
+
+## License bundle validation
+
+The root license and Cargo package metadata declare MIT for this project's own code. The third-party notice generator resolves the locked Windows dependency graph, includes build dependencies, and preserves upstream license/copyright/notice texts with SHA-256 digests. Missing WebView2 crate licenses are taken from the exact crate revisions; the native loader notice is taken from its official SDK package license. Rust standard-library notices come from the installed toolchain's copyright bundle.
+
+Run `python scripts/generate_notices.py --check` and `cargo package --list --allow-dirty` to check reproducibility and packaging. Source and executable distributions must keep `LICENSE`, `THIRD_PARTY_NOTICES.md`, and all referenced `third-party/` files. This is scoped to the recorded dependencies, Windows target, and toolchain; updates require a renewed check.

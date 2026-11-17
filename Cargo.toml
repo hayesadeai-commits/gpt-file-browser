@@ -2,11 +2,12 @@
 name = "gpt-file-browser"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "Unofficial Windows desktop file manager for ChatGPT Library and storage"
 repository = "https://github.com/hayesadeai-commits/gpt-file-browser"
 keywords = ["chatgpt", "file-manager", "windows", "webview2", "storage"]
 categories = ["gui", "filesystem"]
-include = ["Cargo.toml", "Cargo.lock", "build.rs", "README.md", "VALIDATION.md", "src/**", "tests/**"]
+include = ["Cargo.toml", "Cargo.lock", ".gitattributes", "build.rs", "README.md", "VALIDATION.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "third-party/**", "scripts/generate_notices.py", "src/**", "tests/**"]
 
 # WebView2 stays in-process; no external automation server or API key is required.
 [dependencies]

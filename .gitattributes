@@ -1,0 +1,6 @@
+# Keep the lockfile digest reproducible across Windows and Unix checkouts.
+Cargo.lock text eol=lf
+LICENSE text eol=lf
+THIRD_PARTY_NOTICES.md text eol=lf
+# Preserve upstream license bytes and their recorded SHA-256 digests verbatim.
+third-party/** -text -whitespace

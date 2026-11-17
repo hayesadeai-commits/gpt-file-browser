@@ -9,6 +9,7 @@
 
 mod capture;
 mod changes;
+mod diagnostics;
 mod download;
 mod export;
 mod icon;
@@ -57,6 +58,7 @@ enum AppEvent {
     TrashResult(u64, Result<Value, String>),
     ChangeResult(u64, String, Result<Value, String>),
     ChangeSent(u64, String, service::Session, Result<Value, String>),
+    BridgeSmoke(Result<Value, String>),
 }
 
 /// Listing page sizes to request, largest first; `None` is the service default.
@@ -518,6 +520,11 @@ impl Batches {
 fn journal(root: &Path, job: &changes::Job, nonce: u64) -> Result<(), String> {
     let dir = root.join("reports");
     std::fs::create_dir_all(&dir).map_err(|_| "Could not create the action log directory")?;
+    diagnostics::record(
+        root,
+        "queue_state",
+        json!({"batch":nonce,"sent":job.requests_sent,"unfinished":job.current.len(),"confirming":job.confirmations.len(),"queued":job.remaining.len(),"verified":job.outcomes.iter().filter(|o|o.status=="verified").count(),"attention":job.outcomes.iter().filter(|o|o.status=="uncertain"||o.status=="failed").count(),"stopped":job.stop}),
+    );
     let report = job_receipt(job);
     let temp = dir.join(format!("actions-{nonce}.tmp"));
     std::fs::write(
@@ -675,6 +682,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Running a development build must not create cookies or receipts in the repository.
     let root = private_data_root(std::env::var_os("LOCALAPPDATA"))?;
     std::fs::create_dir_all(&root)?;
+    diagnostics::record(
+        &root,
+        "startup",
+        json!({"version":env!("CARGO_PKG_VERSION")}),
+    );
     let event_loop = EventLoopBuilder::<AppEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
@@ -787,6 +799,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let smoke_deadline = std::env::args()
         .any(|a| a == "--smoke-test")
         .then(|| Instant::now() + Duration::from_secs(5));
+    let mut bridge_smoke_ok = false;
     // Every callback is serialized here. The deadlines wake an otherwise idle event loop.
     event_loop.run(move |event, _, flow| {
         *flow = smoke_deadline
@@ -799,7 +812,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             publish_inventory(&shell, &scan);
         }
         if smoke_deadline.is_some_and(|t| Instant::now() >= t) {
-            if !shell_ready {
+            if !shell_ready || !bridge_smoke_ok {
                 std::process::exit(2);
             }
             *flow = ControlFlow::Exit;
@@ -837,7 +850,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     || cmd.starts_with("open:")
                     || (cmd == "browser" && !opened);
                 match cmd.as_str() {
-                    "__ready" => shell_ready = true,
+                    "__ready" => {
+                        shell_ready = true;
+                        if smoke_deadline.is_some() {
+                            let p=proxy.clone();
+                            // Exercise the real WebView2/DevTools JSON bridge with synthetic data.
+                            // No session, network request, or cloud mutation is involved.
+                            let _=service::evaluate_json(&shell,"(async()=>({sent:Date.now(),mutation_status:200}))()".into(),move |r|{let _=p.send_event(AppEvent::BridgeSmoke(r));});
+                        }
+                    },
                     _ if cmd.starts_with("bounds:") => {
                         if let Some([x, y, w, h]) = pane_rect(&cmd[7..]) {
                             let _ = browser.set_bounds(bounds(x, y, w, h));
@@ -1374,11 +1395,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            Event::UserEvent(AppEvent::BridgeSmoke(Ok(value))) => {
+                    bridge_smoke_ok=changes::browser_integer(&value["sent"]).is_some() && changes::browser_integer(&value["mutation_status"])==Some(200);
+                    diagnostics::record(&root,"bridge_smoke",json!({"passed":bridge_smoke_ok,"timestamp_is_integer_json":value["sent"].is_u64(),"status_is_integer_json":value["mutation_status"].is_u64()}));
+            }
             Event::UserEvent(AppEvent::ChangeSent(n,id,original_session,result))=>{
                 if n==batches.active_nonce && let Some(j)=batches.job.as_mut() && j.current.contains_key(&id) && !j.confirmations.contains_key(&id) {
                     let value=result.unwrap_or(Value::Null);
-                    if let Some(sent)=value["sent"].as_u64() {
-                        let http=value["mutation_status"].as_u64().and_then(|v|u16::try_from(v).ok());
+                    diagnostics::record(&root,"send_receipt",json!({"batch":n,"timestamp_present":value.get("sent").is_some(),"timestamp_is_integer_json":value["sent"].is_u64(),"timestamp_valid":changes::browser_integer(&value["sent"]).is_some(),"http":changes::browser_integer(&value["mutation_status"])}));
+                    if let Some(sent)=changes::browser_integer(&value["sent"]) {
+                        let http=changes::browser_integer(&value["mutation_status"]).and_then(|v|u16::try_from(v).ok());
                         j.request_sent(&id,changes::Confirmation{session:original_session,sent,mutation_status:http,verifying:false});
                         // An ambiguous/rejected response still requires readback, but does not
                         // justify sending more mutations while that ambiguity is resolved.
@@ -1406,6 +1432,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .as_str()
                         .unwrap_or("Unrecognized action result")
                         .to_string();
+                    // Log a fixed outcome code, never the remote message or file identity.
+                    diagnostics::record(&root,"file_result",json!({"batch":n,"outcome":match state.as_str(){"verified"=>"verified","failed"=>"failed","uncertain"=>"uncertain",_=>"unrecognized"}}));
                     let trashing = j.action == changes::Action::Trash;
                     // Hints about cheaper confirmation reads apply to the files that follow.
                     if job_context_valid {batches.lookup.learn(&value["lookup"]);}

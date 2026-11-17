@@ -60,6 +60,14 @@ pub struct Confirmation {
     pub verifying: bool,
 }
 
+/// CDP can encode JavaScript integers as floating-point JSON (e.g. 200.0).
+/// Accept only exact, nonnegative safe integers; never truncate malformed values.
+pub fn browser_integer(value: &Value) -> Option<u64> {
+    let n = value.as_f64()?;
+    (n.is_finite() && (0.0..=9_007_199_254_740_991.0).contains(&n) && n.fract() == 0.0)
+        .then_some(n as u64)
+}
+
 /// What is known about confirming a file's state without reading all of Trash.
 /// `Some(true)` works with this service, `Some(false)` does not, `None` is untested.
 /// These hints only choose which read is tried first; they never count as evidence.
@@ -310,6 +318,19 @@ mod tests {
             &json!({"id":id,"name":"test.txt","file_id":"file_fixture","access_kind":"owned"}),
         )
         .unwrap()
+    }
+    #[test]
+    fn cdp_numbers_accept_integral_floats_without_truncation() {
+        for json in ["1700000000000", "1700000000000.0", "1.7e12"] {
+            assert_eq!(
+                browser_integer(&serde_json::from_str(json).unwrap()),
+                Some(1_700_000_000_000)
+            );
+        }
+        for json in ["null", "true", "-1", "200.5", "9007199254740992", "\"200\""] {
+            assert_eq!(browser_integer(&serde_json::from_str(json).unwrap()), None);
+        }
+        assert_eq!(browser_integer(&serde_json::json!(200.0)), Some(200));
     }
     #[test]
     fn independent_pools_obey_backpressure_and_drain_after_stop() {

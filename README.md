@@ -40,6 +40,7 @@ The app stores its profiles and generated reports under `%LOCALAPPDATA%\GPTStora
 - `app-data/chatgpt-profile/`: authenticated ChatGPT browser profile.
 - `app-data/interface/`: local UI WebView profile.
 - `reports/`: exported metadata, diagnostic reports, and action receipts.
+- `reports/diagnostic.log`: automatic queue/bridge diagnostics, limited to 30 days and 10 MiB (older entries may expire sooner at the size cap). Pruned on startup, daily while logging, and at the size limit. Contains event codes, times and aggregate counts, not filenames, file IDs, credentials or session data. This retention limit applies to the diagnostic log, not exported reports or action receipts.
 
 These files may contain credentials, filenames, and account identifiers. Keep them private. Chrome's profile is not imported or modified. If `LOCALAPPDATA` is missing or relative, startup fails instead of falling back to the project directory. Files saved through ChatGPT's native Download dialog go to the destination you choose.
 
@@ -101,6 +102,7 @@ The source ignore rules exclude local secrets, profiles, reports, binaries, and 
 | [src/service.rs](src/service.rs) / [src/listing_probe.js](src/listing_probe.js) | Authenticated read requests, bounded retry, slim listing rows, and read-only endpoint comparison |
 | [src/capture.rs](src/capture.rs) / [src/schema.rs](src/schema.rs) | Session observation, bounded schema diagnostics, and URL boundaries |
 | [src/changes.rs](src/changes.rs) | Reviewed soft-delete/restore: batches, eligibility, lookup hints, and script assembly |
+| [src/diagnostics.rs](src/diagnostics.rs) | Bounded local diagnostic log with age and size retention |
 | [src/changes.js](src/changes.js) / [src/preflight.js](src/preflight.js) | The browser-side sequence for one file: live metadata check, one mutation, readback verification |
 | [src/ui.html](src/ui.html) / [src/ui.css](src/ui.css) | Trusted local shell markup, icon sprite, and the single stylesheet (light/dark tokens) |
 | [src/inventory.js](src/inventory.js) | View stores, incremental updates, sorting/filtering, range selection, review dialogs, and batch progress |

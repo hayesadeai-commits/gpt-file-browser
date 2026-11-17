@@ -55,7 +55,7 @@ enum AppEvent {
     /// Epoch, file ID, listed revision, image, enlarged, interrupted (retryable).
     PreviewResult(u64, String, Option<String>, Option<String>, bool, bool),
     TrashResult(u64, Result<Value, String>),
-    ChangeResult(u64, Result<Value, String>),
+    ChangeResult(u64, String, Result<Value, String>),
 }
 
 /// Listing page sizes to request, largest first; `None` is the service default.
@@ -88,7 +88,7 @@ const MSG_NAV_PAUSED_JOB: &str =
     "ChatGPT navigation is paused while queued file changes are processing.";
 const MSG_NAV_PAUSED_LISTING: &str =
     "ChatGPT navigation is paused while files are being listed. Stop the scan to browse.";
-const MSG_CLOSING: &str = "Finishing the current file check before closing…";
+const MSG_CLOSING: &str = "Finishing in-flight file checks before closing…";
 
 /// A line for the always-visible status area. Alerts are refusals and failures the
 /// user needs to notice; the shell renders them more prominently than progress.
@@ -393,9 +393,9 @@ fn publish_job(shell: &wry::WebView, job: &changes::Job, id: u64, sent: &mut usi
     let data = json!({
         "id": id,
         "action": job.action,
-        "active": job.current.is_some(),
+        "active": !job.current.is_empty(),
         "stopping": job.stop,
-        "remaining": job.remaining.len() + usize::from(job.current.is_some()),
+        "remaining": job.remaining.len() + job.current.len(),
         "verified": verified,
         "skipped": skipped,
         "attention": job.outcomes.len() - verified - skipped,
@@ -428,7 +428,7 @@ fn cancel_waiting(waiting: &mut VecDeque<changes::Review>, root: &Path) -> Resul
         let mut j = changes::Job {
             action: r.action,
             remaining: r.files.into(),
-            current: None,
+            current: BTreeMap::new(),
             outcomes: Vec::new(),
             stop: true,
         };
@@ -444,7 +444,7 @@ fn cancel_waiting(waiting: &mut VecDeque<changes::Review>, root: &Path) -> Resul
 struct Batches {
     job: Option<changes::Job>,
     waiting: VecDeque<changes::Review>,
-    /// Nonce of the batch whose file is in flight; independent of newer review dialogs.
+    /// Nonce of the batch whose files are in flight; independent of newer review dialogs.
     active_nonce: u64,
     /// Outcomes of the active job already published to the shell.
     sent: usize,
@@ -455,9 +455,9 @@ struct Batches {
 impl Batches {
     /// Whether a file's mutation or verification is in flight right now.
     fn busy(&self) -> bool {
-        self.job.as_ref().is_some_and(|j| j.current.is_some())
+        self.job.as_ref().is_some_and(|j| !j.current.is_empty())
     }
-    /// Start the next confirmed batch only after the previous active file finishes.
+    /// Start the next confirmed batch only after every active file finishes.
     fn start_queued(
         &mut self,
         browser: &wry::WebView,
@@ -471,7 +471,7 @@ impl Batches {
             let mut next = changes::Job {
                 action: r.action,
                 remaining: r.files.into(),
-                current: None,
+                current: BTreeMap::new(),
                 outcomes: Vec::new(),
                 stop: false,
             };
@@ -507,13 +507,7 @@ impl Batches {
 fn journal(root: &Path, job: &changes::Job, nonce: u64) -> Result<(), String> {
     let dir = root.join("reports");
     std::fs::create_dir_all(&dir).map_err(|_| "Could not create the action log directory")?;
-    let report = json!({
-        "action": job.action,
-        "outcomes": job.outcomes,
-        "pending": job.current,
-        "remaining": job.remaining.len(),
-        "queued_files": job.remaining,
-    });
+    let report = job_receipt(job);
     let temp = dir.join(format!("actions-{nonce}.tmp"));
     std::fs::write(
         &temp,
@@ -524,9 +518,20 @@ fn journal(root: &Path, job: &changes::Job, nonce: u64) -> Result<(), String> {
         .map_err(|_| "Could not commit the action log".into())
 }
 
-/// Claim one file, persist its pending receipt, then begin its preflight/mutation.
-/// Failure to journal prevents the request from starting. No second file is started
-/// while Job.current is occupied.
+/// Preserve all outstanding files even when responses finish out of order.
+/// Null means no request remains in flight, including for recovery tooling.
+fn job_receipt(job: &changes::Job) -> Value {
+    json!({
+        "action": job.action,
+        "outcomes": job.outcomes,
+        "pending": if job.current.is_empty() {None} else {Some(&job.current)},
+        "remaining": job.remaining.len(),
+        "queued_files": job.remaining,
+    })
+}
+
+/// Fill the small operation window, journaling each reservation before dispatch.
+/// Capacity is held until that file completes verification; retries never resend a mutation.
 fn change_next(
     browser: &wry::WebView,
     session: &service::Session,
@@ -536,7 +541,7 @@ fn change_next(
     proxy: &Proxy,
     root: &Path,
 ) -> Result<(), String> {
-    if let Some(row) = job.take_next() {
+    while let Some(row) = job.take_next() {
         let result = journal(root, job, nonce).and_then(|_| {
             changes::run(
                 browser,
@@ -549,7 +554,7 @@ fn change_next(
             )
         });
         if let Err(e) = result {
-            job.current = None;
+            job.current.remove(&row.id);
             job.stop = true;
             job.outcomes.push(changes::Outcome {
                 id: row.id,
@@ -780,7 +785,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let mut status: Option<Note> = None;
         match event {
-            // Finish verification of an active mutation before closing; skip remaining files.
+            // Finish every in-flight verification before closing; skip unstarted files.
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
@@ -1007,7 +1012,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 let queued = changes::Job {
                                     action: r.action,
                                     remaining: r.files.clone().into(),
-                                    current: None,
+                                    current: BTreeMap::new(),
                                     outcomes: Vec::new(),
                                     stop: false,
                                 };
@@ -1349,10 +1354,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             // Apply only verified metadata. Other outcomes stop this batch and block that file,
             // leaving unrelated rows eligible for a later review without another full scan.
-            Event::UserEvent(AppEvent::ChangeResult(n, result)) => {
+            Event::UserEvent(AppEvent::ChangeResult(n, id, result)) => {
                 if n == batches.active_nonce
                     && let Some(j) = batches.job.as_mut()
-                    && let Some(f) = j.current.take()
+                    && let Some(f) = j.current.remove(&id)
                 {
                     let value =
                         result.unwrap_or_else(|e| json!({"status": "uncertain", "message": e}));
@@ -1363,7 +1368,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .to_string();
                     let trashing = j.action == changes::Action::Trash;
                     // Hints about cheaper confirmation reads apply to the files that follow.
-                    batches.lookup.learn(&value["lookup"]);
+                    if job_context_valid {batches.lookup.learn(&value["lookup"]);}
                     if state == "verified" && job_context_valid {
                         let row = inventory::parse_row(&value["node"]).unwrap_or_else(|_| f.clone());
                         let (from, to) = if trashing { ("files", "trash") } else { ("trash", "files") };
@@ -1393,6 +1398,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         status: state,
                         message,
                     });
+                    // Persist this result even if another file is still verifying. Journal
+                    // failure stops new work but must not abandon already-started checks.
+                    if let Err(e)=journal(&root,j,n) {j.stop=true;status=alert(e);}
                     if let Some(s) = &session
                         && let Err(e) =
                             change_next(&browser, s, j, n, batches.lookup, &proxy, &root)
@@ -1404,13 +1412,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "{} batch: {} verified, {} remaining.",
                             if trashing { "Trash" } else { "Restore" },
                             j.outcomes.iter().filter(|o| o.status == "verified").count(),
-                            j.remaining.len() + usize::from(j.current.is_some())
+                            j.remaining.len() + j.current.len()
                         ));
                     }
-                    let finished = j.current.is_none();
+                    let finished = j.current.is_empty();
                     let stopped = j.stop;
-                    // Starting the next file already journaled this state; record it here only
-                    // when the batch has ended.
+                    // Persist the final drained/skipped state once all in-flight checks finish.
                     if finished && let Err(e) = journal(&root, j, n) {
                         status = alert(e);
                     }
@@ -1476,6 +1483,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod state_tests {
     use super::*;
+    #[test]
+    fn receipts_preserve_each_outstanding_file() {
+        let row = |id| inventory::parse_row(&json!({"id":id,"name":"fixture.txt"})).unwrap();
+        let mut job = changes::Job {
+            action: changes::Action::Trash,
+            current: BTreeMap::from([
+                ("libfile_a".into(), row("libfile_a")),
+                ("libfile_b".into(), row("libfile_b")),
+            ]),
+            remaining: VecDeque::new(),
+            outcomes: vec![],
+            stop: false,
+        };
+        assert_eq!(job_receipt(&job)["pending"].as_object().unwrap().len(), 2);
+        job.current.remove("libfile_b");
+        assert!(job_receipt(&job)["pending"].get("libfile_a").is_some());
+        job.current.clear();
+        assert!(job_receipt(&job)["pending"].is_null());
+    }
     #[test]
     fn private_storage_never_falls_back_to_the_project() {
         assert!(private_data_root(None).is_err());

@@ -1,4 +1,4 @@
-//! Reviewed, sequential soft-delete and restore operations.
+//! Reviewed soft-delete and restore operations with bounded deletion concurrency.
 //!
 //! Each file is checked against current service metadata before one mutation is
 //! issued. Success requires readback evidence; an HTTP success alone is insufficient.
@@ -11,7 +11,7 @@
 use crate::{AppEvent, inventory::FileRow, service};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use tao::event_loop::EventLoopProxy;
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,12 +36,13 @@ pub struct Outcome {
     pub status: String,
     pub message: String,
 }
-/// Sequential batch state. current reserves the one in-flight file; stop prevents
-/// new requests but lets the current request finish its verification.
+/// At most four Trash pipelines can run at once; restore stays sequential.
+/// Each reservation lasts through its own preflight, mutation, and verified readback.
+/// Stop prevents new work but never abandons verification already in flight.
 pub struct Job {
     pub action: Action,
     pub remaining: VecDeque<FileRow>,
-    pub current: Option<FileRow>,
+    pub current: BTreeMap<String, FileRow>,
     pub outcomes: Vec<Outcome>,
     pub stop: bool,
 }
@@ -83,7 +84,7 @@ pub fn reserved_ids(
     if let Some(job) = job {
         ids.extend(
             job.current
-                .iter()
+                .values()
                 .chain(job.remaining.iter())
                 .map(|f| f.id.clone()),
         );
@@ -97,7 +98,7 @@ pub fn reserved_ids(
 /// Pop FIFO work only when no file remains active or pending in the current batch.
 /// Keeping this decision pure makes serialization testable without a live WebView.
 pub fn next_batch(job: Option<&Job>, waiting: &mut VecDeque<Review>) -> Option<Review> {
-    if job.is_some_and(|j| j.current.is_some() || !j.remaining.is_empty()) {
+    if job.is_some_and(|j| !j.current.is_empty() || !j.remaining.is_empty()) {
         return None;
     }
     waiting.pop_front()
@@ -110,7 +111,7 @@ pub fn validate_queue(
     job: Option<&Job>,
     waiting: &VecDeque<Review>,
 ) -> Result<(), String> {
-    if job.is_some_and(|j| j.stop && j.current.is_some()) {
+    if job.is_some_and(|j| j.stop && !j.current.is_empty()) {
         return Err("Wait for the current batch to stop.".into());
     }
     if waiting.len() >= 20 {
@@ -127,12 +128,9 @@ pub fn validate_queue(
 }
 
 impl Job {
-    /// Reserve the next file or drain the rest as skipped after a stop.
-    /// Repeated calls while a file is active cannot duplicate a mutation.
+    /// Reserve capacity for one complete file operation, not just its DELETE call.
+    /// Restores are left at one; Trash overlaps four independent files to hide latency.
     pub fn take_next(&mut self) -> Option<FileRow> {
-        if self.current.is_some() {
-            return None;
-        }
         if self.stop {
             while let Some(f) = self.remaining.pop_front() {
                 self.outcomes.push(Outcome {
@@ -144,9 +142,19 @@ impl Job {
             }
             return None;
         }
-        let f = self.remaining.pop_front()?;
-        self.current = Some(f.clone());
-        Some(f)
+        let capacity = if self.action == Action::Trash { 4 } else { 1 };
+        if self.current.len() >= capacity {
+            return None;
+        }
+        while let Some(f) = self.remaining.pop_front() {
+            // Native review already deduplicates IDs. Keep this defense at dispatch too.
+            if self.current.contains_key(&f.id) || self.outcomes.iter().any(|o| o.id == f.id) {
+                continue;
+            }
+            self.current.insert(f.id.clone(), f.clone());
+            return Some(f);
+        }
+        None
     }
 }
 
@@ -203,8 +211,9 @@ pub fn run(
             "Only owned Library files can be changed here; use ChatGPT for this item.".into(),
         );
     }
+    let id = row.id.clone();
     service::evaluate_json(view, script(session, row, action, lookup), move |r| {
-        let _ = proxy.send_event(AppEvent::ChangeResult(generation, r));
+        let _ = proxy.send_event(AppEvent::ChangeResult(generation, id, r));
     })
 }
 
@@ -278,7 +287,7 @@ mod tests {
         let mut job = Job {
             action: Action::Trash,
             remaining: vec![row("libfile_a")].into(),
-            current: None,
+            current: BTreeMap::new(),
             outcomes: vec![],
             stop: false,
         };
@@ -298,7 +307,7 @@ mod tests {
         job.take_next();
         assert!(next_batch(Some(&job), &mut waiting).is_none());
         assert_eq!(waiting.len(), 2);
-        job.current.take();
+        job.current.clear();
         assert_eq!(next_batch(Some(&job), &mut waiting).unwrap().nonce, 20);
         assert_eq!(next_batch(None, &mut waiting).unwrap().nonce, 30);
     }
@@ -307,7 +316,7 @@ mod tests {
         let mut job = Job {
             action: Action::Trash,
             remaining: vec![row("libfile_a"), row("libfile_b")].into(),
-            current: None,
+            current: BTreeMap::new(),
             outcomes: vec![],
             stop: false,
         };
@@ -355,7 +364,7 @@ mod tests {
             )
             .is_err()
         );
-        job.current.take();
+        job.current.clear();
         job.stop = true;
         job.take_next();
         assert!(reserved_ids(Some(&job), &VecDeque::new()).is_empty());
@@ -365,7 +374,7 @@ mod tests {
         let job = Job {
             action: Action::Trash,
             remaining: VecDeque::new(),
-            current: Some(row("libfile_a")),
+            current: BTreeMap::from([("libfile_a".into(), row("libfile_a"))]),
             outcomes: vec![],
             stop: true,
         };
@@ -403,23 +412,63 @@ mod tests {
         assert!(!eligible(&f));
     }
     #[test]
-    fn stop_does_not_start_more_files_or_duplicate_current() {
-        let f =
-            parse_row(&json!({"id":"libfile_x","name":"A","file_id":"f-x","access_kind":"owned"}))
-                .unwrap();
+    fn four_files_overlap_but_stop_drains_only_unstarted_work() {
         let mut j = Job {
             action: Action::Trash,
-            remaining: vec![f.clone(), f].into(),
-            current: None,
+            remaining: vec![
+                row("libfile_a"),
+                row("libfile_b"),
+                row("libfile_c"),
+                row("libfile_d"),
+                row("libfile_e"),
+            ]
+            .into(),
+            current: BTreeMap::new(),
+            outcomes: vec![],
+            stop: false,
+        };
+        assert_eq!(j.take_next().unwrap().id, "libfile_a");
+        assert_eq!(j.take_next().unwrap().id, "libfile_b");
+        assert_eq!(j.take_next().unwrap().id, "libfile_c");
+        assert_eq!(j.take_next().unwrap().id, "libfile_d");
+        assert!(j.take_next().is_none());
+        assert_eq!(j.current.len(), 4);
+        // B may finish first without consuming A's reservation or opening a new batch.
+        assert_eq!(j.current.remove("libfile_b").unwrap().id, "libfile_b");
+        j.stop = true;
+        assert!(j.take_next().is_none());
+        assert!(j.current.contains_key("libfile_a"));
+        assert_eq!(j.current.len(), 3);
+        assert_eq!(j.outcomes[0].id, "libfile_e");
+        assert_eq!(j.outcomes[0].status, "skipped");
+        let mut waiting = VecDeque::from([Review {
+            nonce: 9,
+            action: Action::Trash,
+            files: vec![row("libfile_d")],
+        }]);
+        assert!(next_batch(Some(&j), &mut waiting).is_none());
+        j.current.remove("libfile_a");
+        j.current.remove("libfile_d");
+        assert!(next_batch(Some(&j), &mut waiting).is_none());
+        j.current.remove("libfile_c");
+        assert!(next_batch(Some(&j), &mut waiting).is_some());
+    }
+    #[test]
+    fn restore_stays_serial_and_duplicate_ids_are_never_dispatched_twice() {
+        let mut j = Job {
+            action: Action::Restore,
+            remaining: vec![row("libfile_a"), row("libfile_b")].into(),
+            current: BTreeMap::new(),
             outcomes: vec![],
             stop: false,
         };
         assert!(j.take_next().is_some());
         assert!(j.take_next().is_none());
-        assert_eq!(j.remaining.len(), 1);
-        j.stop = true;
-        j.current.take();
+        j.current.clear();
+        assert_eq!(j.take_next().unwrap().id, "libfile_b");
+        j.action = Action::Trash;
+        j.remaining = vec![row("libfile_b"), row("libfile_b")].into();
         assert!(j.take_next().is_none());
-        assert_eq!(j.outcomes[0].status, "skipped");
+        assert_eq!(j.current.len(), 1);
     }
 }

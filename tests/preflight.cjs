@@ -340,3 +340,42 @@ async function change(action,options,lookup){
  assert.equal(kind('photo','image/png'),'image');assert.equal(kind('b.tar.gz'),'archive');assert.equal(kind('notes.md'),'document');assert.equal(kind('blob.bin'),'other');
  console.log('Formatting checks passed: byte sizes and file kinds.');
 }
+
+// Controlled-latency benchmark of production per-file scripts, with no network access.
+// Rust tests enforce the scheduler cap; this checks that overlapping scripts retain
+// their independent preflight, single mutation, and positive readback sequence.
+(async()=>{
+ async function benchmark(concurrency){
+  const files=Array.from({length:8},(_,i)=>({...scanned,id:'libfile_parallel_'+i,file_id:'file_fixture_'+i,name:'fixture-'+i+'.txt'}));
+  const states=new Map(files.map(f=>[f.id,{file:f,events:[],trashed:false}]));
+  let next=0,active=0,peak=0;
+  const fetch=async(url,req={})=>{
+   await new Promise(resolve=>setTimeout(resolve,20));
+   const method=req.method||'GET';
+   const id=method==='POST'?JSON.parse(req.body).allowlist_ids[0]:decodeURIComponent(url.match(/\/files\/(libfile_[^/?]+)/)[1]);
+   const state=states.get(id);assert(state);const f=state.file;
+   const node={...current,id:f.id,file_id:f.file_id,name:f.name,trashed_at:state.trashed?new Date().toISOString():null};
+   if(method==='DELETE'){
+    assert.deepEqual(state.events,['preflight']);state.events.push('delete');state.trashed=true;
+    return {status:200,json:async()=>({})};
+   }
+   if(method==='POST'){
+    assert(state.trashed);state.events.push('verify');
+    return {status:200,json:async()=>({items:[node],cursor:null})};
+   }
+   state.events.push('preflight');return {status:200,json:async()=>node};
+  };
+  const start=performance.now();
+  await Promise.all(Array.from({length:concurrency},async()=>{
+   while(next<files.length){
+    const file=files[next++];active++;peak=Math.max(peak,active);
+    const result=await vm.runInNewContext(changeScript({file,action:'trash',authorization:'test',lookup:{by_id:true,by_name:false,node:false}}),{location:{origin:'https://chatgpt.com'},URLSearchParams,AbortSignal,Date,setTimeout,fetch});
+    active--;assert.equal(result.status,'verified');assert.equal(result.node.id,file.id);
+   }
+  }));
+  for(const state of states.values())assert.deepEqual(state.events,['preflight','delete','verify']);
+  assert(peak<=concurrency);return {ms:Math.round(performance.now()-start),peak};
+ }
+ const serial=await benchmark(1),parallel=await benchmark(4);assert.equal(parallel.peak,4);
+ console.log(`Checked deletion pipeline (mock network): serial ${serial.ms} ms, four in flight ${parallel.ms} ms; every file preflighted, sent once, and verified.`);
+})().catch(e=>{console.error(e);process.exitCode=1;});

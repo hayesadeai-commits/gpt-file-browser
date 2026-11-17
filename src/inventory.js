@@ -615,7 +615,7 @@ window.showReview = r => {
   $('review-title').textContent = `${trash ? 'Move' : 'Restore'} ${count.toLocaleString()} ${noun}${trash ? ' to Trash' : ''}?`;
   $('review-total').textContent = `${bytesText(total)} in total` + (jobActive ? ' · runs after the batch in progress' : '');
   $('review-note').textContent = trash
-    ? 'ChatGPT removes trashed files permanently after 30 days. Until then they can be restored from Trash. This app never deletes files permanently.'
+    ? 'ChatGPT removes trashed files permanently after 30 days. Until then they can be restored from Trash. This app never deletes files permanently. Up to four files process at once; Stop waits for in-flight checks.'
     : 'These files return to your Library. ChatGPT may reject a restore if your storage is full.';
   const list = document.createDocumentFragment();
   for (const f of r.files) {
@@ -673,7 +673,7 @@ function paintJob() {
   if (!job) return;
   const trash = job.action === 'trash', done = job.verified + job.attention + job.skipped, total = done + job.remaining;
   const parts = [];
-  if (job.active) parts.push(job.stopping ? 'Stopping after the current file…' : `${trash ? 'Moving to Trash' : 'Restoring'} · ${done.toLocaleString()} of ${total.toLocaleString()}`);
+  if (job.active) parts.push(job.stopping ? 'Finishing in-flight file checks…' : `${trash ? 'Moving to Trash' : 'Restoring'} · ${done.toLocaleString()} of ${total.toLocaleString()}`);
   else parts.push(`${job.verified.toLocaleString()} ${job.verified === 1 ? 'file' : 'files'} ${trash ? 'moved to Trash' : 'restored'}`);
   if (job.attention) parts.push(`${job.attention.toLocaleString()} ${job.attention === 1 ? 'needs' : 'need'} attention`);
   if (job.skipped) parts.push(`${job.skipped.toLocaleString()} not attempted`);

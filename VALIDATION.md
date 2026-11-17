@@ -4,7 +4,7 @@ Documentation reviewed against the current source on November 16, 2026. This fil
 
 ## Latest recorded checks
 
-- 40 Rust unit tests passed.
+- 42 Rust unit tests passed.
 - JavaScript regression groups passed: preflight comparisons, Trash verification and pagination, the listing fetch (bounded retry, backoff, slim rows), hover lifecycle/retry behavior, Shift-click ranges, queue visibility with whole-collection filtering/sorting/caching, size and file-kind formatting, and JPG content fallback.
 - JavaScript syntax checks, `cargo fmt --check`, strict Clippy, and the release build (with path remapping) passed.
 - Startup smoke testing passed on the release build. Comparing the checkout before and after startup found no newly created files there.
@@ -28,7 +28,7 @@ Rust unit tests cover:
 - Page-size fallback: stepping down on refusals and unanswered requests, keeping a size once a scan completes with it, and restoring the fastest size when even the service default fails.
 - Classifying listing replies (rejected sign-in, refusal, no answer) before they reach the inventory, and equivalence of slim and full listing rows.
 - Rebuilding listing URLs without inherited search/type/size filters and rejecting unrelated hosts.
-- Mutation eligibility, blocked-file isolation, stopping a sequential batch, FIFO batch promotion, duplicate reservations, and queue limits.
+- Mutation eligibility, blocked-file isolation, bounded four-file Trash concurrency, stopping without abandoning in-flight checks, out-of-order receipt tracking, sequential restore, FIFO batch promotion, duplicate reservations, and queue limits.
 - Merging of Trash lookup hints, and assembly of the mutation script: each placeholder appears once, a hostile file name stays inside its JSON string, and no permanent or batch delete is requested.
 - Account-change invalidation of pending Trash requests and cached rows.
 - Diagnostic schema redaction, bounded structural output, and CSV formula protection.
@@ -114,3 +114,9 @@ The default scanner now combines the verified 50-item POST file listing with fol
 This comparison verified listing and metadata equivalence, not mutation speed or live deletion/restore behavior. No cloud files were changed during the investigation. A successful 100-item first-page probe was not used to claim full coverage or to increase the production page size.
 
 The updated application also completed a full live hybrid scan with the same file total and folder metadata as the reference traversal. Its end-to-end elapsed time was less than half the earlier application scan in this session. Exact account-level totals remain in the private comparison report, not in source documentation.
+
+## Bounded deletion concurrency
+
+Trash batches now overlap four complete per-file operations, retaining the existing production preflight and readback script unchanged. Each request is associated with its batch nonce and file ID. A pipeline slot is not released until that file returns its verified/failed/uncertain result. Restores remain sequential. Stop/failure/context changes prevent new dispatch and allow already-started verification to complete; the next batch cannot start while any file remains in flight.
+
+The Rust tests exercise the four-file cap, out-of-order completion, duplicate prevention, stopping with another file outstanding, receipt persistence for all active files, and sequential restore. The Node harness runs the actual per-file script with a simulated delayed service and asserts that each overlapping file receives its own preflight, exactly one delete, and positive Trash readback. A controlled-latency comparison demonstrated lower elapsed time with four in flight; this is not a live-service throughput measurement. No cloud files were deleted for this change.

@@ -36,16 +36,30 @@ pub struct Outcome {
     pub status: String,
     pub message: String,
 }
-/// At most four Trash pipelines can run at once; restore stays sequential.
-/// Each reservation lasts through its own preflight, mutation, and verified readback.
-/// Stop prevents new work but never abandons verification already in flight.
+/// Separate bounded send and confirmation queues. current reserves every unfinished
+/// file, including sends that have not replied, so the backlog cannot exceed the cap.
+/// Session material in Confirmation is deliberately never serialized to receipts.
 pub struct Job {
     pub action: Action,
     pub remaining: VecDeque<FileRow>,
     pub current: BTreeMap<String, FileRow>,
+    pub confirmations: BTreeMap<String, Confirmation>,
+    pub requests_sent: usize,
     pub outcomes: Vec<Outcome>,
     pub stop: bool,
 }
+pub const SEND_LIMIT: usize = 4;
+pub const VERIFY_LIMIT: usize = 4;
+pub const UNCONFIRMED_LIMIT: usize = 12;
+
+#[derive(Clone)]
+pub struct Confirmation {
+    pub session: service::Session,
+    pub sent: u64,
+    pub mutation_status: Option<u16>,
+    pub verifying: bool,
+}
+
 /// What is known about confirming a file's state without reading all of Trash.
 /// `Some(true)` works with this service, `Some(false)` does not, `None` is untested.
 /// These hints only choose which read is tried first; they never count as evidence.
@@ -128,8 +142,29 @@ pub fn validate_queue(
 }
 
 impl Job {
-    /// Reserve capacity for one complete file operation, not just its DELETE call.
-    /// Restores are left at one; Trash overlaps four independent files to hide latency.
+    /// Convert a completed send into bounded pending verification without releasing its ID.
+    pub fn request_sent(&mut self, id: &str, receipt: Confirmation) -> bool {
+        if self.action != Action::Trash
+            || !self.current.contains_key(id)
+            || self.confirmations.contains_key(id)
+        {
+            return false;
+        }
+        self.confirmations.insert(id.into(), receipt);
+        self.requests_sent += 1;
+        true
+    }
+    /// Readback proceeds even after Stop or an error; only new sends are stopped.
+    pub fn next_confirmation(&mut self) -> Option<(String, Confirmation)> {
+        if self.confirmations.values().filter(|c| c.verifying).count() >= VERIFY_LIMIT {
+            return None;
+        }
+        let (id, entry) = self.confirmations.iter_mut().find(|(_, c)| !c.verifying)?;
+        entry.verifying = true;
+        Some((id.clone(), entry.clone()))
+    }
+    /// Reserve a send slot and one position in the shared unfinished-file budget.
+    /// Confirmed sends leave this pool but retain their reservation until readback finishes.
     pub fn take_next(&mut self) -> Option<FileRow> {
         if self.stop {
             while let Some(f) = self.remaining.pop_front() {
@@ -142,8 +177,14 @@ impl Job {
             }
             return None;
         }
-        let capacity = if self.action == Action::Trash { 4 } else { 1 };
-        if self.current.len() >= capacity {
+        let capacity = if self.action == Action::Trash {
+            SEND_LIMIT
+        } else {
+            1
+        };
+        if self.current.len().saturating_sub(self.confirmations.len()) >= capacity
+            || self.current.len() >= UNCONFIRMED_LIMIT
+        {
             return None;
         }
         while let Some(f) = self.remaining.pop_front() {
@@ -180,6 +221,8 @@ fn script(
     row: &FileRow,
     action: Action,
     lookup: TrashLookup,
+    phase: &str,
+    confirmation: Option<&Confirmation>,
 ) -> String {
     let args = serde_json::json!({
         "file": row,
@@ -187,14 +230,17 @@ fn script(
         "authorization": session.authorization,
         "account": session.account,
         "lookup": lookup,
+        "phase": phase,
+        "sent": confirmation.map(|c|c.sent),
+        "mutation_status": confirmation.and_then(|c|c.mutation_status),
     });
     include_str!("changes.js")
         .replace("__PREFLIGHT__", include_str!("preflight.js"))
         .replace("__ARGS__", &args.to_string())
 }
 
-/// Run a single preflight, mutation, and verification sequence in ChatGPT.
-/// The generation argument is the review nonce, not the inventory scan generation.
+/// Run preflight and one mutation; Trash readback uses its independent queue.
+/// Restore retains the complete sequential flow. Generation is the active batch nonce.
 /// These routes and query parameters were verified in Space's loaded action implementation.
 /// Never request permanent deletion, and never retry an ambiguous mutation.
 pub fn run(
@@ -212,7 +258,44 @@ pub fn run(
         );
     }
     let id = row.id.clone();
-    service::evaluate_json(view, script(session, row, action, lookup), move |r| {
+    let original_session = session.clone();
+    let phase = if action == Action::Trash {
+        "send"
+    } else {
+        "full"
+    };
+    service::evaluate_json(
+        view,
+        script(session, row, action, lookup, phase, None),
+        move |r| {
+            if r.as_ref().is_ok_and(|v| v["status"] == "sent") {
+                let _ = proxy.send_event(AppEvent::ChangeSent(generation, id, original_session, r));
+            } else {
+                let _ = proxy.send_event(AppEvent::ChangeResult(generation, id, r));
+            }
+        },
+    )
+}
+
+/// Verify only: the browser script's mutation block is inaccessible in this phase.
+pub fn verify(
+    view: &wry::WebView,
+    row: &FileRow,
+    receipt: &Confirmation,
+    generation: u64,
+    lookup: TrashLookup,
+    proxy: EventLoopProxy<AppEvent>,
+) -> Result<(), String> {
+    let id = row.id.clone();
+    let expression = script(
+        &receipt.session,
+        row,
+        Action::Trash,
+        lookup,
+        "verify",
+        Some(receipt),
+    );
+    service::evaluate_json(view, expression, move |r| {
         let _ = proxy.send_event(AppEvent::ChangeResult(generation, id, r));
     })
 }
@@ -227,6 +310,75 @@ mod tests {
             &json!({"id":id,"name":"test.txt","file_id":"file_fixture","access_kind":"owned"}),
         )
         .unwrap()
+    }
+    #[test]
+    fn independent_pools_obey_backpressure_and_drain_after_stop() {
+        let mut job = Job {
+            action: Action::Trash,
+            remaining: (0..20).map(|i| row(&format!("libfile_{i}"))).collect(),
+            current: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
+            outcomes: vec![],
+            stop: false,
+        };
+        let receipt = || Confirmation {
+            session: service::Session {
+                url: String::new(),
+                authorization: "fixture-secret".into(),
+                account: None,
+            },
+            sent: 123,
+            mutation_status: Some(200),
+            verifying: false,
+        };
+        // Four sends may overlap four readbacks; pending files retain reservations.
+        for _ in 0..3 {
+            let ids: Vec<_> = (0..SEND_LIMIT)
+                .map(|_| job.take_next().unwrap().id)
+                .collect();
+            assert!(job.take_next().is_none());
+            for id in ids {
+                assert!(job.request_sent(&id, receipt()));
+                assert!(!job.request_sent(&id, receipt()));
+            }
+            while job.next_confirmation().is_some() {}
+        }
+        assert_eq!(job.current.len(), UNCONFIRMED_LIMIT);
+        assert_eq!(job.requests_sent, 12);
+        assert_eq!(
+            job.confirmations.values().filter(|c| c.verifying).count(),
+            VERIFY_LIMIT
+        );
+        assert!(job.take_next().is_none());
+        let id = job
+            .confirmations
+            .iter()
+            .find(|(_, c)| c.verifying)
+            .unwrap()
+            .0
+            .clone();
+        job.confirmations.remove(&id);
+        job.current.remove(&id);
+        assert!(job.next_confirmation().is_some());
+        assert!(job.take_next().is_some());
+        assert!(job.take_next().is_none());
+        job.stop = true;
+        assert!(job.take_next().is_none());
+        let id = job
+            .confirmations
+            .iter()
+            .find(|(_, c)| c.verifying)
+            .unwrap()
+            .0
+            .clone();
+        job.confirmations.remove(&id);
+        job.current.remove(&id);
+        assert!(
+            job.next_confirmation().is_some(),
+            "Stopping sends must still drain queued verification"
+        );
+        assert_eq!(job.outcomes.len(), 7);
     }
     #[test]
     fn lookup_hints_merge_only_explicit_answers() {
@@ -268,7 +420,7 @@ mod tests {
             by_id: Some(true),
             ..Default::default()
         };
-        let built = script(&session, &file, Action::Trash, lookup);
+        let built = script(&session, &file, Action::Trash, lookup, "full", None);
         let name = serde_json::to_string(&file.name).unwrap();
         assert_eq!(built.matches(&name).count(), 1);
         let (head, tail) = built.split_once(&name).unwrap();
@@ -288,6 +440,8 @@ mod tests {
             action: Action::Trash,
             remaining: vec![row("libfile_a")].into(),
             current: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
             outcomes: vec![],
             stop: false,
         };
@@ -317,6 +471,8 @@ mod tests {
             action: Action::Trash,
             remaining: vec![row("libfile_a"), row("libfile_b")].into(),
             current: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
             outcomes: vec![],
             stop: false,
         };
@@ -375,6 +531,8 @@ mod tests {
             action: Action::Trash,
             remaining: VecDeque::new(),
             current: BTreeMap::from([("libfile_a".into(), row("libfile_a"))]),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
             outcomes: vec![],
             stop: true,
         };
@@ -424,6 +582,8 @@ mod tests {
             ]
             .into(),
             current: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
             outcomes: vec![],
             stop: false,
         };
@@ -459,6 +619,8 @@ mod tests {
             action: Action::Restore,
             remaining: vec![row("libfile_a"), row("libfile_b")].into(),
             current: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
             outcomes: vec![],
             stop: false,
         };

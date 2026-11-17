@@ -615,7 +615,7 @@ window.showReview = r => {
   $('review-title').textContent = `${trash ? 'Move' : 'Restore'} ${count.toLocaleString()} ${noun}${trash ? ' to Trash' : ''}?`;
   $('review-total').textContent = `${bytesText(total)} in total` + (jobActive ? ' · runs after the batch in progress' : '');
   $('review-note').textContent = trash
-    ? 'ChatGPT removes trashed files permanently after 30 days. Until then they can be restored from Trash. This app never deletes files permanently. Up to four files process at once; Stop waits for in-flight checks.'
+    ? 'ChatGPT removes trashed files permanently after 30 days. Until then they can be restored from Trash. This app never deletes files permanently. Four request slots and four verification slots run together, capped at 12 unfinished files. Stop waits for outstanding confirmations.'
     : 'These files return to your Library. ChatGPT may reject a restore if your storage is full.';
   const list = document.createDocumentFragment();
   for (const f of r.files) {
@@ -637,6 +637,7 @@ window.showReview = r => {
 // ---- Batch progress ---------------------------------------------------------
 /** Rust sends each outcome once, with running totals. Outcomes accumulate here, and the
  * list stays collapsed unless opened; receipt messages are plain text, not markup. */
+// #region batch_progress
 let job = null, jobShown = 0;
 window.showJob = data => {
   jobActive = data.active;
@@ -659,6 +660,18 @@ window.showJob = data => {
   }
   jobShown += data.outcomes.length;
   $('job-list').append(items);
+  // Pending confirmations are not final outcomes and must not release file reservations.
+  document.getElementById('job-confirmations')?.remove();
+  if(data.confirmation_rows?.length){
+    const pending=document.createElement('div');pending.id='job-confirmations';
+    for(const file of data.confirmation_rows){
+      const row=document.createElement('div'),name=document.createElement('span'),message=document.createElement('span');
+      row.className='job-item';name.textContent=file.name;
+      message.textContent=file.verifying?'Request sent — verifying in Trash':'Request sent — awaiting confirmation';
+      row.append(name,message);pending.append(row);
+    }
+    $('job-list').append(pending);
+  }
   $('job').hidden = false;
   if (released) {
     reservedVersion++;
@@ -675,6 +688,13 @@ function paintJob() {
   const parts = [];
   if (job.active) parts.push(job.stopping ? 'Finishing in-flight file checks…' : `${trash ? 'Moving to Trash' : 'Restoring'} · ${done.toLocaleString()} of ${total.toLocaleString()}`);
   else parts.push(`${job.verified.toLocaleString()} ${job.verified === 1 ? 'file' : 'files'} ${trash ? 'moved to Trash' : 'restored'}`);
+  if(trash){
+    parts.push(`${(job.requests_sent||0).toLocaleString()} requests sent`);
+    parts.push(`${job.verified.toLocaleString()} verified in Trash`);
+    if(job.awaiting_confirmation)parts.push(`${job.awaiting_confirmation} awaiting confirmation`);
+    if(job.sending)parts.push(`${job.sending} sending`);
+    if(job.confirmation_backpressure&&!job.stopping)parts.push('Request queue paused at confirmation limit');
+  }
   if (job.attention) parts.push(`${job.attention.toLocaleString()} ${job.attention === 1 ? 'needs' : 'need'} attention`);
   if (job.skipped) parts.push(`${job.skipped.toLocaleString()} not attempted`);
   if (queuedBatchCount) parts.push(`${queuedBatchCount} more ${queuedBatchCount === 1 ? 'batch' : 'batches'} queued (${queuedFileCount.toLocaleString()} files)`);
@@ -684,8 +704,9 @@ function paintJob() {
   $('job-stop').hidden = !job.active;
   $('job-stop').disabled = job.stopping;
   $('job-dismiss').hidden = job.active;
-  $('job-toggle').hidden = !jobShown;
+  $('job-toggle').hidden = !jobShown && !job.confirmation_rows?.length;
 }
+// #endregion batch_progress
 $('job-stop').onclick = () => send('stop_actions');
 $('job-toggle').onclick = () => {
   const open = $('job-list').hidden;

@@ -90,6 +90,24 @@ async function change(action,options,lookup){
  return {result,...service.state};
 }
 (async()=>{
+ // Execute the actual split phases against one shared service. A sent receipt
+ // releases request capacity, but only independent positive readback is success.
+ for(const opt of [{supportsId:true},{supportsId:true,visibleAfter:Infinity},{supportsId:true,lostResponse:true}]){
+  const service=libraryService(opt);
+  const fetch=async(url,request)=>{
+   const response=await service.fetch(url,request);
+   if(opt.lostResponse&&request?.method==='DELETE')throw Error('response lost');
+   return response;
+  };
+  const run=extra=>vm.runInNewContext(changeScript({file:scanned,action:'trash',authorization:'test',lookup:{by_id:true,node:false},...extra}),{location:{origin:'https://chatgpt.com'},URLSearchParams,AbortSignal,setTimeout:fn=>fn(),fetch});
+  const sent=await run({phase:'send'});
+  assert.equal(sent.status,'sent');assert.equal(service.state.mutations,1);
+  assert.equal(service.state.node,1);assert.equal(service.state.by_id+service.state.by_name+service.state.walk,0,'Sending must not wait for readback');
+  if(opt.lostResponse)assert.equal(sent.mutation_status,null);
+  const verified=await run({phase:'verify',sent:sent.sent,mutation_status:sent.mutation_status});
+  assert.equal(verified.status,opt.visibleAfter===Infinity?'uncertain':'verified');
+  assert.equal(service.state.mutations,1,'Verification must never repeat the mutation');
+ }
  const hints=o=>JSON.parse(JSON.stringify(o));
  // A trashed file's node is gone and Trash is large. With an ID filter the file is
  // confirmed in one Trash request instead of one per 50 trashed files.
@@ -379,3 +397,21 @@ async function change(action,options,lookup){
  const serial=await benchmark(1),parallel=await benchmark(4);assert.equal(parallel.peak,4);
  console.log(`Checked deletion pipeline (mock network): serial ${serial.ms} ms, four in flight ${parallel.ms} ms; every file preflighted, sent once, and verified.`);
 })().catch(e=>{console.error(e);process.exitCode=1;});
+
+// Progress must not turn a sent request into success or release its reservation.
+{
+ const nodes=new Map();
+ const element=()=>({style:{},append(){},replaceChildren(){},remove(){}});
+ const $=id=>{if(!nodes.has(id))nodes.set(id,element());return nodes.get(id)};
+ const reservedIds=new Set(['libfile_fixture']);
+ const context=vm.createContext({window:{},document:{createDocumentFragment:element,createElement:element,getElementById:()=>null},$,reservedIds,reservedVersion:0,jobActive:false,queuedBatchCount:0,queuedFileCount:0,requestRender(){vm.runInContext('paintJob()',context)},updateActions(){}});
+ vm.runInContext(region('inventory.js','batch_progress'),context);
+ const data={id:1,action:'trash',active:true,offset:0,verified:0,attention:0,skipped:0,remaining:1,requests_sent:1,awaiting_confirmation:1,outcomes:[],confirmation_rows:[{id:'libfile_fixture',name:'fixture.png',verifying:true}]};
+ context.window.showJob(data);
+ assert(reservedIds.has('libfile_fixture'));
+ assert.match($('job-text').textContent,/1 requests sent.*0 verified in Trash/);
+ assert.equal($('job-bar').style.width,'0%');assert.equal($('job-toggle').hidden,false);
+ context.window.showJob({...data,active:false,verified:1,remaining:0,awaiting_confirmation:0,confirmation_rows:[],outcomes:[{id:'libfile_fixture',name:'fixture.png',status:'verified',message:'Verified'}]});
+ assert(!reservedIds.has('libfile_fixture'));assert.equal($('job-bar').style.width,'100%');
+ console.log('Split progress checks passed: sent is pending, verified releases reservations.');
+}

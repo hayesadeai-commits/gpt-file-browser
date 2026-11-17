@@ -56,6 +56,7 @@ enum AppEvent {
     PreviewResult(u64, String, Option<String>, Option<String>, bool, bool),
     TrashResult(u64, Result<Value, String>),
     ChangeResult(u64, String, Result<Value, String>),
+    ChangeSent(u64, String, service::Session, Result<Value, String>),
 }
 
 /// Listing page sizes to request, largest first; `None` is the service default.
@@ -397,6 +398,12 @@ fn publish_job(shell: &wry::WebView, job: &changes::Job, id: u64, sent: &mut usi
         "stopping": job.stop,
         "remaining": job.remaining.len() + job.current.len(),
         "verified": verified,
+        "requests_sent": job.requests_sent,
+        "awaiting_confirmation": job.confirmations.len(),
+        "sending": job.current.len().saturating_sub(job.confirmations.len()),
+        "confirmation_limit": changes::UNCONFIRMED_LIMIT,
+        "confirmation_backpressure": !job.stop && !job.remaining.is_empty() && job.current.len()>=changes::UNCONFIRMED_LIMIT,
+        "confirmation_rows": job.confirmations.iter().filter_map(|(id,c)| job.current.get(id).map(|f|json!({"id":id,"name":f.name,"verifying":c.verifying}))).collect::<Vec<_>>(),
         "skipped": skipped,
         "attention": job.outcomes.len() - verified - skipped,
         "offset": offset,
@@ -429,6 +436,8 @@ fn cancel_waiting(waiting: &mut VecDeque<changes::Review>, root: &Path) -> Resul
             action: r.action,
             remaining: r.files.into(),
             current: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
             outcomes: Vec::new(),
             stop: true,
         };
@@ -472,6 +481,8 @@ impl Batches {
                 action: r.action,
                 remaining: r.files.into(),
                 current: BTreeMap::new(),
+                confirmations: BTreeMap::new(),
+                requests_sent: 0,
                 outcomes: Vec::new(),
                 stop: false,
             };
@@ -527,11 +538,13 @@ fn job_receipt(job: &changes::Job) -> Value {
         "pending": if job.current.is_empty() {None} else {Some(&job.current)},
         "remaining": job.remaining.len(),
         "queued_files": job.remaining,
+        "requests_sent": job.requests_sent,
+        "confirmations": job.confirmations.iter().map(|(id,c)|json!({"id":id,"sent":c.sent,"mutation_status":c.mutation_status,"verifying":c.verifying})).collect::<Vec<_>>(),
     })
 }
 
-/// Fill the small operation window, journaling each reservation before dispatch.
-/// Capacity is held until that file completes verification; retries never resend a mutation.
+/// Pump independent send/readback pools, journaling reservations before mutation.
+/// The shared unfinished budget stays reserved until readback; reads never resend mutations.
 fn change_next(
     browser: &wry::WebView,
     session: &service::Session,
@@ -541,6 +554,14 @@ fn change_next(
     proxy: &Proxy,
     root: &Path,
 ) -> Result<(), String> {
+    // Verification has its own capacity and remains active when sending is stopped.
+    while let Some((id, receipt)) = job.next_confirmation() {
+        if let Some(row) = job.current.get(&id)
+            && let Err(e) = changes::verify(browser, row, &receipt, nonce, lookup, proxy.clone())
+        {
+            let _ = proxy.send_event(AppEvent::ChangeResult(nonce, id, Err(e)));
+        }
+    }
     while let Some(row) = job.take_next() {
         let result = journal(root, job, nonce).and_then(|_| {
             changes::run(
@@ -1013,6 +1034,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     action: r.action,
                                     remaining: r.files.clone().into(),
                                     current: BTreeMap::new(),
+                confirmations: BTreeMap::new(), requests_sent:0,
                                     outcomes: Vec::new(),
                                     stop: false,
                                 };
@@ -1352,6 +1374,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            Event::UserEvent(AppEvent::ChangeSent(n,id,original_session,result))=>{
+                if n==batches.active_nonce && let Some(j)=batches.job.as_mut() && j.current.contains_key(&id) && !j.confirmations.contains_key(&id) {
+                    let value=result.unwrap_or(Value::Null);
+                    if let Some(sent)=value["sent"].as_u64() {
+                        let http=value["mutation_status"].as_u64().and_then(|v|u16::try_from(v).ok());
+                        j.request_sent(&id,changes::Confirmation{session:original_session,sent,mutation_status:http,verifying:false});
+                        // An ambiguous/rejected response still requires readback, but does not
+                        // justify sending more mutations while that ambiguity is resolved.
+                        if http.is_none_or(|code|!(200..300).contains(&code)){j.stop=true;}
+                        if let Err(e)=journal(&root,j,n){j.stop=true;status=alert(e);}
+                        if let Some(s)=&session && let Err(e)=change_next(&browser,s,j,n,batches.lookup,&proxy,&root){status=alert(e);}
+                        publish_job(&shell,j,n,&mut batches.sent);
+                    }else{
+                        j.stop=true;let _=proxy.send_event(AppEvent::ChangeResult(n,id,Err("Request result missing confirmation context; refresh before retrying.".into())));
+                    }
+                }
+            }
             // Apply only verified metadata. Other outcomes stop this batch and block that file,
             // leaving unrelated rows eligible for a later review without another full scan.
             Event::UserEvent(AppEvent::ChangeResult(n, id, result)) => {
@@ -1359,6 +1398,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     && let Some(j) = batches.job.as_mut()
                     && let Some(f) = j.current.remove(&id)
                 {
+                    j.confirmations.remove(&id);
                     let value =
                         result.unwrap_or_else(|e| json!({"status": "uncertain", "message": e}));
                     let state = value["status"].as_str().unwrap_or("uncertain").to_string();
@@ -1493,10 +1533,28 @@ mod state_tests {
                 ("libfile_b".into(), row("libfile_b")),
             ]),
             remaining: VecDeque::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
             outcomes: vec![],
             stop: false,
         };
         assert_eq!(job_receipt(&job)["pending"].as_object().unwrap().len(), 2);
+        job.request_sent(
+            "libfile_a",
+            changes::Confirmation {
+                session: service::Session {
+                    url: "fixture-url-secret".into(),
+                    authorization: "fixture-token-secret".into(),
+                    account: Some("fixture-account-secret".into()),
+                },
+                sent: 123,
+                mutation_status: Some(200),
+                verifying: false,
+            },
+        );
+        let serialized = job_receipt(&job).to_string();
+        assert!(!serialized.contains("secret"));
+        assert_eq!(job_receipt(&job)["confirmations"][0]["sent"], 123);
         job.current.remove("libfile_b");
         assert!(job_receipt(&job)["pending"].get("libfile_a").is_some());
         job.current.clear();

@@ -1,5 +1,6 @@
 /**
- * Preflight, one mutation, and readback verification for a single reviewed file.
+ * Preflight and one mutation (send phase), independent readback (verify phase),
+ * or the full sequential sequence for restore. Verification cannot issue a mutation.
  * Runs inside the signed-in ChatGPT page. changes.rs fills in the two placeholders
  * below (the preflight function from preflight.js, then the request data) and awaits
  * the returned promise. Each placeholder must appear exactly once, in code, never in a
@@ -128,33 +129,42 @@
     return found;
   }
 
-  // Re-read metadata immediately before mutation; scans may be older than the review dialog.
-  // Nothing has been sent yet, so a failure here is a plain failure, not an uncertain state.
-  let before;
-  try {
-    before = trashing ? await req(base + '/node') : {status: 200, body: await findInTrash()};
-  } catch {
-    return {status: 'failed', message: 'Could not reach ChatGPT to check the file before changing it. Nothing was sent.', lookup};
-  }
-  if (before.status !== 200 || before.body?.id !== f.id) return {status: 'failed', message: trashProblem || 'Could not verify the selected file before changing it.', lookup};
-  const n = before.body;
-  const changed = (__PREFLIGHT__)(f, n);
-  if (changed) return {status: 'failed', message: 'The file changed since scanning (' + changed + '). Refresh and review it again.', lookup};
-  if (trashing && isTrashed(n) || !trashing && !isTrashed(n)) return {status: 'failed', message: 'File state changed since scanning. Refresh before retrying.', lookup};
-
-  // Send exactly one mutation. A timeout can occur after the service commits it.
-  const sent = Date.now();
-  let mutation = null;
-  try {
-    if (trashing) {
-      const q = new URLSearchParams({soft_delete: 'true', file_name: f.name});
-      if (f.file_id) q.set('file_id', f.file_id);
-      if (f.parent) q.set('parent_directory_id', f.parent);
-      mutation = await req(base + '?' + q, 'DELETE');
-    } else {
-      mutation = await req(base + '/restore', 'POST');
+  // Sending and verification are separate native queues. Verification never enters
+  // the preflight/mutation block, including when the original response was lost.
+  let sent = a.sent ?? Date.now();
+  let mutation = a.mutation_status == null ? null : {status: a.mutation_status};
+  if (a.phase === 'verify' && (!trashing || !Number.isFinite(a.sent))) throw Error('Invalid verification context');
+  if (a.phase !== 'verify') {
+    // Re-read metadata immediately before mutation; scans may be older than the review dialog.
+    // Nothing has been sent yet, so a failure here is a plain failure, not an uncertain state.
+    let before;
+    try {
+      before = trashing ? await req(base + '/node') : {status: 200, body: await findInTrash()};
+    } catch {
+      return {status: 'failed', message: 'Could not reach ChatGPT to check the file before changing it. Nothing was sent.', lookup};
     }
-  } catch {}
+    if (before.status !== 200 || before.body?.id !== f.id) return {status: 'failed', message: trashProblem || 'Could not verify the selected file before changing it.', lookup};
+    const n = before.body;
+    const changed = (__PREFLIGHT__)(f, n);
+    if (changed) return {status: 'failed', message: 'The file changed since scanning (' + changed + '). Refresh and review it again.', lookup};
+    if (trashing && isTrashed(n) || !trashing && !isTrashed(n)) return {status: 'failed', message: 'File state changed since scanning. Refresh before retrying.', lookup};
+
+    // Send exactly one mutation. A timeout can occur after the service commits it.
+    sent = Date.now();
+    mutation = null;
+    try {
+      if (trashing) {
+        const q = new URLSearchParams({soft_delete: 'true', file_name: f.name});
+        if (f.file_id) q.set('file_id', f.file_id);
+        if (f.parent) q.set('parent_directory_id', f.parent);
+        mutation = await req(base + '?' + q, 'DELETE');
+      } else {
+        mutation = await req(base + '/restore', 'POST');
+      }
+    } catch {}
+
+  }
+  if (a.phase === 'send') return {status:'sent', sent, mutation_status:mutation?.status ?? null, lookup};
 
   // Verify state independently of the mutation HTTP code; successful transport is not proof.
   const verified = node => ({status: 'verified', message: trashing ? 'Moved to Trash and verified.' : 'Restored and verified.', node, lookup});

@@ -4,7 +4,7 @@ Documentation reviewed against the current source on November 16, 2026. This fil
 
 ## Latest recorded checks
 
-- 42 Rust unit tests passed.
+- 43 Rust unit tests passed.
 - JavaScript regression groups passed: preflight comparisons, Trash verification and pagination, the listing fetch (bounded retry, backoff, slim rows), hover lifecycle/retry behavior, Shift-click ranges, queue visibility with whole-collection filtering/sorting/caching, size and file-kind formatting, and JPG content fallback.
 - JavaScript syntax checks, `cargo fmt --check`, strict Clippy, and the release build (with path remapping) passed.
 - Startup smoke testing passed on the release build. Comparing the checkout before and after startup found no newly created files there.
@@ -117,6 +117,6 @@ The updated application also completed a full live hybrid scan with the same fil
 
 ## Bounded deletion concurrency
 
-Trash batches now overlap four complete per-file operations, retaining the existing production preflight and readback script unchanged. Each request is associated with its batch nonce and file ID. A pipeline slot is not released until that file returns its verified/failed/uncertain result. Restores remain sequential. Stop/failure/context changes prevent new dispatch and allow already-started verification to complete; the next batch cannot start while any file remains in flight.
+Trash batches now run four request slots and four independent verification slots simultaneously, retaining the existing preflight and readback checks. At most 12 files can remain unfinished. Each request is associated with its batch nonce and file ID. A send slot is released after the mutation response; the file remains reserved until its verified/failed/uncertain result. Progress distinguishes requests sent from verified moves. Restores remain sequential. Stop/failure/context changes prevent new dispatch and allow already-started verification to complete; the next batch cannot start while any file remains in flight.
 
-The Rust tests exercise the four-file cap, out-of-order completion, duplicate prevention, stopping with another file outstanding, receipt persistence for all active files, and sequential restore. The Node harness runs the actual per-file script with a simulated delayed service and asserts that each overlapping file receives its own preflight, exactly one delete, and positive Trash readback. A controlled-latency comparison demonstrated lower elapsed time with four in flight; this is not a live-service throughput measurement. No cloud files were deleted for this change.
+The Rust tests exercise independent send/readback capacity, the 12-file backlog cap, duplicate send callbacks, readback draining after Stop, receipt credential exclusion, the four-request cap, out-of-order completion, duplicate prevention, stopping with another file outstanding, receipt persistence for all active files, and sequential restore. The Node harness runs the actual per-file script with a simulated delayed service and asserts that each overlapping file receives its own preflight, exactly one delete, and positive Trash readback. A controlled-latency comparison demonstrated lower elapsed time with four in flight; this is not a live-service throughput measurement. No cloud files were deleted for this change.

@@ -46,9 +46,19 @@ pub struct FileRow {
     pub action_blocked: bool,
 }
 
+/// Separate cursor namespaces for full traversal, folder discovery, and the flat file list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ListingScope {
+    #[default]
+    Nodes,
+    Folders,
+    Files,
+}
+
 #[derive(Clone, Debug)]
 /// One root/folder listing request. A missing cursor means its first page.
 pub struct PageTask {
+    pub scope: ListingScope,
     pub parent: Option<String>,
     pub cursor: Option<String>,
 }
@@ -58,7 +68,7 @@ pub struct PageTask {
 pub struct Inventory {
     pub rows: BTreeMap<String, FileRow>,
     pub queue: VecDeque<PageTask>,
-    visited: HashSet<(Option<String>, Option<String>)>,
+    visited: HashSet<(ListingScope, Option<String>, Option<String>)>,
     folders: HashSet<String>,
     /// Tasks handed out by `next` whose responses have not been accepted yet.
     active: usize,
@@ -74,9 +84,23 @@ impl Inventory {
     pub fn start() -> Self {
         let mut s = Self::default();
         s.queue.push_back(PageTask {
+            scope: crate::inventory::ListingScope::Nodes,
             parent: None,
             cursor: None,
         });
+        s
+    }
+    /// Fast scan: one global file cursor chain plus independent folder-only discovery.
+    /// Both tasks participate in active/queue accounting, so neither can finish the scan alone.
+    pub fn start_fast() -> Self {
+        let mut s = Self::default();
+        for scope in [ListingScope::Files, ListingScope::Folders] {
+            s.queue.push_back(PageTask {
+                scope,
+                parent: None,
+                cursor: None,
+            });
+        }
         s
     }
     /// Take one unseen task. Several tasks may be outstanding at once: different
@@ -98,7 +122,7 @@ impl Inventory {
         };
         if !self
             .visited
-            .insert((task.parent.clone(), task.cursor.clone()))
+            .insert((task.scope, task.parent.clone(), task.cursor.clone()))
         {
             return Err("The service repeated a pagination cursor; refresh is required.".into());
         }
@@ -138,12 +162,21 @@ impl Inventory {
             if item.get("trashed_at").is_some_and(|v| !v.is_null()) {
                 continue;
             }
+            if (task.scope == ListingScope::Files && folder)
+                || (task.scope == ListingScope::Folders && !folder)
+            {
+                return Err("The service ignored the requested listing scope.".into());
+            }
+            if task.scope == ListingScope::Files && self.rows.contains_key(id) {
+                return Err("The flat listing repeated a file; retrying a compatible traversal is required.".into());
+            }
             let row = parse_row(item)?;
             self.rows.insert(id.into(), row);
             self.fresh.push(id.into());
             if folder && self.folders.insert(id.into()) {
                 // Finish current-folder pagination first; visit each discovered folder afterward.
                 self.queue.push_back(PageTask {
+                    scope: task.scope,
                     parent: Some(id.into()),
                     cursor: None,
                 });
@@ -155,6 +188,7 @@ impl Inventory {
             .filter(|c| !c.is_empty())
         {
             self.queue.push_front(PageTask {
+                scope: task.scope,
                 parent: task.parent.clone(),
                 cursor: Some(c.into()),
             });
@@ -247,6 +281,66 @@ mod tests {
         );
     }
     #[test]
+    fn fast_listing_waits_for_files_and_nested_folders_with_separate_cursors() {
+        let mut inv = Inventory::start_fast();
+        let files = inv.next().unwrap().unwrap();
+        let folders = inv.next().unwrap().unwrap();
+        inv.accept(&files,&json!({"items":[{"id":"libfile_a","file_name":"A","directory_id":"libdir_x"}],"cursor":"next"})).unwrap();
+        inv.accept(
+            &folders,
+            &json!({"items":[{"id":"libdir_x","name":"Folder"}],"cursor":"next"}),
+        )
+        .unwrap();
+        let folder_next = inv.next().unwrap().unwrap();
+        assert_eq!(folder_next.scope, ListingScope::Folders);
+        inv.accept(&folder_next, &json!({"items":[],"cursor":null}))
+            .unwrap();
+        let file_next = inv.next().unwrap().unwrap();
+        assert_eq!(file_next.scope, ListingScope::Files);
+        inv.accept(
+            &file_next,
+            &json!({"items":[{"id":"libfile_b","file_name":"B"}],"cursor":null}),
+        )
+        .unwrap();
+        let child = inv.next().unwrap().unwrap();
+        assert_eq!(child.parent.as_deref(), Some("libdir_x"));
+        assert!(inv.next().unwrap().is_none());
+        assert!(!inv.complete);
+        inv.accept(&child, &json!({"items":[],"cursor":null}))
+            .unwrap();
+        assert!(inv.next().unwrap().is_none());
+        assert!(inv.complete);
+        assert_eq!(inv.rows.len(), 3);
+        assert_eq!(inv.rows["libfile_a"].parent, "libdir_x");
+    }
+    #[test]
+    fn fast_listing_rejects_ignored_scope_and_repeated_files() {
+        let mut inv = Inventory::start_fast();
+        let files = inv.next().unwrap().unwrap();
+        let folders = inv.next().unwrap().unwrap();
+        assert!(
+            inv.accept(
+                &folders,
+                &json!({"items":[{"id":"libfile_wrong","name":"Wrong"}],"cursor":null})
+            )
+            .is_err()
+        );
+        inv.accept(
+            &files,
+            &json!({"items":[{"id":"libfile_a","name":"A"}],"cursor":"more"}),
+        )
+        .unwrap();
+        let next = inv.next().unwrap().unwrap();
+        assert!(
+            inv.accept(
+                &next,
+                &json!({"items":[{"id":"libfile_a","name":"A"}],"cursor":null})
+            )
+            .is_err()
+        );
+        assert!(!inv.complete);
+    }
+    #[test]
     fn traverses_pages_and_folders_without_duplicate_files() {
         let mut inv = Inventory::start();
         let first = inv.next().unwrap().unwrap();
@@ -304,6 +398,7 @@ mod tests {
         let mut inv = Inventory::start();
         inv.pages = MAX_PAGES - 1;
         inv.queue.push_back(PageTask {
+            scope: crate::inventory::ListingScope::Nodes,
             parent: Some("libdir_x".into()),
             cursor: None,
         });

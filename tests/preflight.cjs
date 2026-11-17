@@ -181,7 +181,7 @@ async function change(action,options,lookup){
   let calls=0;const waits=[];
   const script=template.replace('{args}',JSON.stringify({url:'https://chatgpt.com/backend-api/files/library/nodes',authorization:'test',account:'acct',fields,...args}));
   const result=await vm.runInNewContext(script,{location:{origin:'https://chatgpt.com'},AbortController,clearTimeout,setTimeout:(fn,ms)=>{if(ms<30000){waits.push(ms);fn();}return 0;},fetch:async(url,options)=>{
-   assert.equal(options.method,'GET');assert.equal(options.headers.Authorization,'test');assert.equal(options.headers['ChatGPT-Account-ID'],'acct');
+   assert.equal(options.method,args.body?'POST':'GET');if(args.body){assert.deepEqual(JSON.parse(options.body),args.body);assert.equal(options.headers['Content-Type'],'application/json');}assert.equal(options.headers.Authorization,'test');assert.equal(options.headers['ChatGPT-Account-ID'],'acct');
    const reply=replies[Math.min(calls++,replies.length-1)];
    return {status:reply.status,headers:{get:name=>name==='retry-after'?reply.retryAfter??null:null},body:{cancel:async()=>{}},text:async()=>reply.text??JSON.stringify(reply.body)};
   }});
@@ -211,7 +211,10 @@ async function change(action,options,lookup){
  assert.deepEqual(JSON.parse(JSON.stringify(r.result.body)),{used_bytes:1,allowed_bytes:2});
  await assert.rejects(run([{status:200,text:'x'.repeat(2097153)}]),/too large/);
  await assert.rejects(vm.runInNewContext(template.replace('{args}','{}'),{location:{origin:'https://example.test'}}),/Sign-in required/);
- console.log('Listing fetch checks passed: bounded retry, backoff, slim rows, status passthrough, size limit.');
+ const postBody={limit:50,cursor:'next',include_hidden_files:true,trashed_only:false};
+ r=await run([{status:503},{status:200,body:page}],{url:'https://chatgpt.com/backend-api/files/library',body:postBody});
+ assert.equal(r.calls,2);assert.equal(r.result.status,200);assert.equal(r.result.body.items[0].id,'libfile_a');
+ console.log('Listing fetch checks passed: GET/POST, exact read-only body, bounded retry, slim rows, validation shape.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 
 // Hover lifecycle: opening, leaving during fetch, and cached re-entry.

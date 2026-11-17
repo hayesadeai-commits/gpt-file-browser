@@ -21,7 +21,7 @@ The sidebar shows how much of your ChatGPT storage is used once a scan has conne
 ## Features and boundaries
 
 - Complete cursor pagination and recursive Library-folder traversal, including hidden files.
-- Fast listing: up to six folders are read at the same time (each folder's own pages stay in order), and the scan asks for larger pages than ChatGPT's default of about 20 items. Larger node-listing pages are an optimization the service may ignore or refuse: a page that fails at an unconfirmed size restarts the scan one size smaller (100, then 50, then the service default with no limit parameter). Throttling and gateway errors (HTTP 429/502/503/504) are retried briefly instead of failing the scan. The completion message reports pages and seconds.
+- Fast listing: the global file listing reads 50 files per page through `POST /backend-api/files/library`, while a folder-only nodes traversal builds the folder tree. These run together, with up to six outstanding reads. Completion requires both cursor chains and all discovered folders to finish. If the fast endpoint fails, ignores the requested scope, or repeats files, the partial result is discarded and the app restarts the compatible full nodes traversal. That fallback can step down its requested page size (100, 50, then no limit parameter). Throttling and gateway errors are retried briefly. The completion message reports pages and seconds.
 - Files and images in ChatGPT storage; connected-provider roots such as Google Drive are excluded.
 - Native-style file-browser layout that follows the Windows light/dark setting: sidebar navigation with file counts and a storage meter, an edge-to-edge file table, and a batch progress strip whose details stay collapsed until opened. Attention counts stay visible.
 - Numeric size/date/name sorting, search, type/folder filters, cross-page multiselection and size totals.
@@ -43,7 +43,7 @@ The app stores its profiles and generated reports under `%LOCALAPPDATA%\GPTStora
 
 These files may contain credentials, filenames, and account identifiers. Keep them private. Chrome's profile is not imported or modified. If `LOCALAPPDATA` is missing or relative, startup fails instead of falling back to the project directory. Files saved through ChatGPT's native Download dialog go to the destination you choose.
 
-The app learns the Library request context from authenticated requests made by the signed-in page. Session discovery accepts both the current `POST /backend-api/files/library` request and legacy `GET /backend-api/files/library/nodes` requests; scanning then uses the supported nodes endpoint for cursor/folder traversal. Search terms and filters from a POST request are not copied into the scan. Session headers remain in memory and are sent only to ChatGPT. A changed sign-in context invalidates completed scans and pending reviews. Credentials are excluded from CSV, action receipts and diagnostics.
+The app learns the Library request context from authenticated requests made by the signed-in page. Session discovery accepts both the current `POST /backend-api/files/library` request and legacy `GET /backend-api/files/library/nodes` requests; scanning uses the global POST listing for files plus the nodes endpoint for folder discovery, with the original full nodes traversal retained as a fallback. Search terms and filters from a POST request are not copied into the scan. Session headers remain in memory and are sent only to ChatGPT. A changed sign-in context invalidates completed scans and pending reviews. Credentials are excluded from CSV, action receipts and diagnostics.
 
 **Diagnostics** provides optional sanitized response schemas. ChatGPT's observed web endpoints are not a supported public personal-storage API, so service changes may require an app update. Native ChatGPT actions remain available in the embedded browser.
 
@@ -98,7 +98,7 @@ The source ignore rules exclude local secrets, profiles, reports, binaries, and 
 | --- | --- |
 | [src/main.rs](src/main.rs) | Native windows, separate WebViews, IPC validation, scan/job state, page-size fallback, and action receipts |
 | [src/inventory.rs](src/inventory.rs) | Normalized metadata, concurrent folder traversal, pagination, and completeness |
-| [src/service.rs](src/service.rs) | Authenticated browser requests (bounded retry, slim listing rows) and asynchronous JSON results |
+| [src/service.rs](src/service.rs) / [src/listing_probe.js](src/listing_probe.js) | Authenticated read requests, bounded retry, slim listing rows, and read-only endpoint comparison |
 | [src/capture.rs](src/capture.rs) / [src/schema.rs](src/schema.rs) | Session observation, bounded schema diagnostics, and URL boundaries |
 | [src/changes.rs](src/changes.rs) | Reviewed soft-delete/restore: batches, eligibility, lookup hints, and script assembly |
 | [src/changes.js](src/changes.js) / [src/preflight.js](src/preflight.js) | The browser-side sequence for one file: live metadata check, one mutation, readback verification |
@@ -113,7 +113,7 @@ The source ignore rules exclude local secrets, profiles, reports, binaries, and 
 
 - Only the local shell receives IPC. Authenticated content runs in a separate WebView and profile.
 - Every listing request has an ID that is never reused; a reply is applied only while its request is still registered, so replies from a stopped or restarted scan are inert. Trash keeps its own generation. A review nonce binds confirmation to the native-approved selection.
-- A scan is complete only when its queue is empty and every issued page has been accepted. Storage usage is fetched alongside the listing and never gates or invalidates it.
+- Files and folders have separate cursor namespaces. A scan is complete only when both listings finish, its queue is empty, and every issued page has been accepted. Storage usage is fetched alongside the listing and never gates or invalidates it.
 - Rust sends the shell full snapshots only at the start and end of a listing and on sign-in changes. Listing pages and per-file results are sent as incremental patches (`patchView`, `showJob`), so their cost does not grow with the collection.
 - Lookup hints (`TrashLookup`) only decide which confirmation read is tried first. They never count as evidence: with every shortcut claimed to work, a change that cannot be seen is still reported as uncertain.
 - Request data is inserted into [src/changes.js](src/changes.js) last and exactly once, where a JSON value is expected, so a file name cannot alter the script.
@@ -154,3 +154,9 @@ The generator uses cached Cargo metadata and retrieves the pinned WebView2 licen
 Forks are welcome. This repository does not accept pull requests; pull request creation is disabled. Report reproducible bugs or request features through [GitHub Issues](https://github.com/hayesadeai-commits/gpt-file-browser/issues).
 
 Do not attach browser profiles, authentication headers, account inventories, or private file contents to public issues. Report sensitive security findings through [private vulnerability reporting](https://github.com/hayesadeai-commits/gpt-file-browser/security/advisories/new).
+
+## Read-only endpoint comparison
+
+For maintainers investigating service changes, close the normal app and run `GPT File Browser.exe --compare-listings`. Leave the comparison window open and avoid changing files while it runs. It compares the original complete node traversal with two complete 50-item POST listings and a folder-only traversal, and probes whether a 100-item first page is accepted. The production scanner deliberately uses the fully compared 50-item page size.
+
+Only aggregate counts, timings, and mismatch counts are saved to `%LOCALAPPDATA%\GPTStorageBrowser\reports\listing-comparison.json`. Names, IDs, timestamps, cursor values, and authorization headers remain in memory. Keep the report private; it contains account-level counts. The comparison does not delete, restore, or upload files. A one-page size probe alone does not establish complete coverage at that size.

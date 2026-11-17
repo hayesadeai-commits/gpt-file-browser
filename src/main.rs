@@ -49,6 +49,7 @@ enum AppEvent {
     Observation(u64, Observation),
     Status(String),
     Session(service::Session),
+    ListingComparison(Result<Value, String>),
     /// Request ID and the listing/usage reply.
     ApiResult(u64, Result<Value, String>),
     /// Epoch, file ID, listed revision, image, enlarged, interrupted (retryable).
@@ -141,6 +142,8 @@ struct Scan {
     size: usize,
     /// The size index of the last traversal that completed, once one has.
     proven: Option<usize>,
+    /// Fallback is remembered for this session after the fast endpoint fails.
+    legacy: bool,
 }
 
 impl Scan {
@@ -153,7 +156,11 @@ impl Scan {
     }
     /// Start an empty traversal. Requests are issued by `pump` once a session exists.
     fn restart(&mut self) {
-        self.inv = inventory::Inventory::start();
+        self.inv = if self.legacy {
+            inventory::Inventory::start()
+        } else {
+            inventory::Inventory::start_fast()
+        };
         self.pending.clear();
         self.running = true;
     }
@@ -175,9 +182,15 @@ impl Scan {
         let mut flying = self.pages_in_flight();
         while flying < SCAN_CONCURRENCY {
             let Some(task) = self.inv.next()? else { break };
-            let url = session.page_url(&task, PAGE_SIZES[self.size])?;
             self.requests += 1;
-            service::get(browser, session, &url, true, self.requests, proxy.clone())?;
+            service::list_page(
+                browser,
+                session,
+                &task,
+                PAGE_SIZES[self.size],
+                self.requests,
+                proxy.clone(),
+            )?;
             self.pending.insert(self.requests, Pending::Page(task));
             flying += 1;
         }
@@ -226,6 +239,10 @@ impl Scan {
         self.inv.accept(task, &body).map_err(PageError::Refused)?;
         let session = session.ok_or_else(|| PageError::Final("Session unavailable".into()))?;
         self.pump(browser, session, proxy).map_err(PageError::Final)
+    }
+    /// Fall back once, discarding partial fast results; authentication failures are final.
+    fn falls_back_for(&self, error: &PageError) -> bool {
+        !self.legacy && !matches!(error, PageError::Final(_))
     }
     /// Whether a failed page is worth retrying with smaller pages.
     /// A refusal always is. A missing answer is only blamed on the page size while that
@@ -716,7 +733,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
         .build_as_child(&window)?;
     capture::install(&browser, enabled.clone(), epoch.clone(), proxy.clone())?;
+    let mut compare_pending = std::env::args().any(|a| a == "--compare-listings");
     let mut opened = false;
+    if compare_pending {
+        browser.load_url(SPACE_URL)?;
+        opened = true;
+    }
     let mut session: Option<service::Session> = None;
     // Count actual outstanding work across UI epochs; clearing a cache does not cancel fetches.
     let mut preview_inflight = 0usize;
@@ -1170,6 +1192,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     scan.halt(e);
                     publish_inventory(&shell, &scan);
                 }
+                if compare_pending {
+                    compare_pending=false;
+                    if let Err(e)=service::compare_listings(&browser,&s,proxy.clone()) {status=alert(e);}
+                    else {status=info("Comparing listing endpoints (read-only). Please leave this window open.");}
+                }
                 session = Some(s);
             }
             // Only requests still registered may update the snapshot being built.
@@ -1186,8 +1213,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Some(Pending::Page(task)) if scan.running => {
                         let outcome =
                             scan.advance(&task, result, &browser, session.as_ref(), &proxy);
+                        let fast_fallback=outcome.as_ref().err().is_some_and(|e|scan.falls_back_for(e));
                         let restarted = match outcome {
                             Ok(()) => false,
+                            // A failed fast file/folder listing never becomes a partial "complete"
+                            // inventory. Clear all its outstanding requests and restart legacy traversal.
+                            Err(error) if scan.falls_back_for(&error) => {
+                                scan.legacy=true;scan.size=0;scan.proven=None;scan.restart();
+                                let begun=match &session {Some(s)=>scan.begin(&browser,s,&proxy),None=>Err("Session unavailable".into())};
+                                if let Err(e)=begun {scan.fail(e);}
+                                true
+                            }
                             // A larger page may be what the service refused or timed out on:
                             // start over one size smaller before reporting a failure.
                             Err(error) if scan.shrinks_for(&error) => {
@@ -1218,7 +1254,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             publish_inventory(&shell, &scan);
                         }
                         status = if restarted && scan.running {
-                            info(MSG_SMALLER_PAGES)
+                            info(if fast_fallback {"Fast listing unavailable. Restarting with compatible folder traversal…"} else {MSG_SMALLER_PAGES})
                         } else if scan.running {
                             info(format!(
                                 "Scanning… {} entries across {} pages.",
@@ -1406,6 +1442,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            Event::UserEvent(AppEvent::ListingComparison(result))=>{
+                let report=result.unwrap_or_else(|e|json!({"error":e}));
+                let dir=root.join("reports");let _=std::fs::create_dir_all(&dir);
+                if std::fs::write(dir.join("listing-comparison.json"),serde_json::to_vec_pretty(&report).unwrap_or_default()).is_ok(){status=info("Read-only listing comparison completed.");}
+                else{status=alert("Could not save listing comparison summary.");}
+            }
             // Release native capacity even for stale UI epochs; the shell rejects their images.
             Event::UserEvent(AppEvent::PreviewResult(epoch, id, modified, image, full, retry)) => {
                 preview_inflight = preview_inflight.saturating_sub(1);
@@ -1503,6 +1545,26 @@ mod state_tests {
         assert!(scan.running && scan.inv.error.is_none() && scan.pending.is_empty());
     }
 
+    #[test]
+    fn fast_listing_falls_back_once_without_keeping_partial_data() {
+        let mut scan = Scan::default();
+        scan.restart();
+        let task = scan.inv.next().unwrap().unwrap();
+        assert_eq!(task.scope, inventory::ListingScope::Files);
+        scan.pending.insert(1, Pending::Page(task));
+        assert!(scan.falls_back_for(&PageError::Refused("bad shape".into())));
+        assert!(scan.falls_back_for(&PageError::Transport("timeout".into())));
+        assert!(!scan.falls_back_for(&PageError::Final("unauthorized".into())));
+        scan.legacy = true;
+        scan.restart();
+        assert!(scan.pending.is_empty());
+        assert!(!scan.inv.complete);
+        assert_eq!(
+            scan.inv.next().unwrap().unwrap().scope,
+            inventory::ListingScope::Nodes
+        );
+        assert!(!scan.falls_back_for(&PageError::Refused("bad shape".into())));
+    }
     #[test]
     fn page_size_falls_back_safely_and_keeps_what_works() {
         let refused = PageError::Refused(String::new());

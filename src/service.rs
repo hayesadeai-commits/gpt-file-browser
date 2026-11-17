@@ -80,7 +80,14 @@ impl Session {
                 q.append_pair(&k, &v);
             }
             q.append_pair("include_hidden_files", "true");
-            q.append_pair("include_files", "true");
+            q.append_pair(
+                "include_files",
+                if task.scope == crate::inventory::ListingScope::Folders {
+                    "false"
+                } else {
+                    "true"
+                },
+            );
             q.append_pair("include_provider_roots", "false");
             q.append_pair("include_onedrive", "false");
             if let Some(p) = &task.parent {
@@ -132,6 +139,45 @@ pub fn get(
     request: u64,
     proxy: EventLoopProxy<AppEvent>,
 ) -> Result<(), String> {
+    read(view, session, url, None, slim, request, proxy)
+}
+
+/// The global POST file listing and folder-only GET traversal share the same
+/// bounded read transport. The POST body is fixed, with no inherited UI filters.
+pub fn list_page(
+    view: &wry::WebView,
+    session: &Session,
+    task: &PageTask,
+    limit: Option<u32>,
+    request: u64,
+    proxy: EventLoopProxy<AppEvent>,
+) -> Result<(), String> {
+    if task.scope == crate::inventory::ListingScope::Files {
+        let body = serde_json::json!({"limit":50,"cursor":task.cursor,"include_hidden_files":true,"trashed_only":false});
+        read(
+            view,
+            session,
+            "https://chatgpt.com/backend-api/files/library",
+            Some(body),
+            true,
+            request,
+            proxy,
+        )
+    } else {
+        let url = session.page_url(task, limit)?;
+        read(view, session, &url, None, true, request, proxy)
+    }
+}
+
+fn read(
+    view: &wry::WebView,
+    session: &Session,
+    url: &str,
+    body: Option<serde_json::Value>,
+    slim: bool,
+    request: u64,
+    proxy: EventLoopProxy<AppEvent>,
+) -> Result<(), String> {
     if !view
         .url()
         .map_err(|_| "Browser unavailable")?
@@ -144,23 +190,26 @@ pub fn get(
         || ![
             "/backend-api/files/library/nodes",
             "/backend-api/files/library/storage/usage",
+            "/backend-api/files/library",
         ]
         .contains(&u.path())
+        || (body.is_some() != (u.path() == "/backend-api/files/library"))
     {
         return Err("Request outside the Library scope".into());
     }
     let fields = slim.then_some(crate::inventory::ROW_FIELDS);
-    let args = serde_json::json!({"url":url,"authorization":session.authorization,"account":session.account,"fields":fields});
+    let args = serde_json::json!({"url":url,"authorization":session.authorization,"account":session.account,"fields":fields,"body":body});
     let script = format!(
         r#"(async()=>{{
       if(location.origin!=='https://chatgpt.com')throw new Error('Sign-in required');
       const a={args},headers={{Authorization:a.authorization}};
       if(a.account)headers['ChatGPT-Account-ID']=a.account;
+      if(a.body)headers['Content-Type']='application/json';
       const pick=item=>{{if(item===null||typeof item!=='object')return item;const out={{}};for(const k of a.fields)if(k in item)out[k]=item[k];return out}};
       for(let attempt=0;;attempt++){{
         const c=new AbortController(),t=setTimeout(()=>c.abort(),30000);
         try{{
-          const r=await fetch(a.url,{{method:'GET',credentials:'include',headers,signal:c.signal}});
+          const r=await fetch(a.url,{{method:a.body?'POST':'GET',credentials:'include',headers,body:a.body?JSON.stringify(a.body):undefined,signal:c.signal}});
           // Throttling and gateway errors are transient; back off briefly instead of failing the scan.
           if([429,502,503,504].includes(r.status)&&attempt<3){{
             const wait=Math.min(Number(r.headers.get('retry-after'))*1000||500*2**attempt,8000);
@@ -230,6 +279,27 @@ pub fn evaluate_json(
     .map_err(|_| "Could not start browser request".into())
 }
 
+/// Developer-only read-only comparison. Results contain aggregates, never file/session data.
+pub fn compare_listings(
+    view: &wry::WebView,
+    session: &Session,
+    proxy: EventLoopProxy<AppEvent>,
+) -> Result<(), String> {
+    let url = session.page_url(
+        &PageTask {
+            scope: crate::inventory::ListingScope::Nodes,
+            parent: None,
+            cursor: None,
+        },
+        None,
+    )?;
+    let args = serde_json::json!({"url":url,"authorization":session.authorization,"account":session.account});
+    let script = include_str!("listing_probe.js").replacen("__PROBE_ARGS__", &args.to_string(), 1);
+    evaluate_json(view, script, move |result| {
+        let _ = proxy.send_event(AppEvent::ListingComparison(result));
+    })
+}
+
 /// Read one 50-item Trash page. POST is the service's read-only listing method;
 /// this function does not restore or delete anything.
 pub fn list_trash(
@@ -251,6 +321,27 @@ pub fn list_trash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fast_folder_discovery_explicitly_excludes_files() {
+        let s = Session {
+            url:
+                "https://chatgpt.com/backend-api/files/library/nodes?include_files=true&q=filtered"
+                    .into(),
+            authorization: "test".into(),
+            account: None,
+        };
+        let task = PageTask {
+            scope: crate::inventory::ListingScope::Folders,
+            parent: Some("libdir_example".into()),
+            cursor: Some("next".into()),
+        };
+        let u = url::Url::parse(&s.page_url(&task, None).unwrap()).unwrap();
+        let q: std::collections::HashMap<_, _> = u.query_pairs().collect();
+        assert_eq!(q["include_files"], "false");
+        assert_eq!(q["include_hidden_files"], "true");
+        assert!(!q.contains_key("q"));
+        assert_eq!(q["parent_directory_id"], "libdir_example");
+    }
     #[test]
     fn session_discovery_supports_current_and_legacy_listing_requests() {
         assert_eq!(
@@ -286,6 +377,7 @@ mod tests {
         let url = s
             .page_url(
                 &PageTask {
+                    scope: crate::inventory::ListingScope::Nodes,
                     parent: None,
                     cursor: Some("a&b=c".into()),
                 },
@@ -312,6 +404,7 @@ mod tests {
             account: None,
         };
         let task = PageTask {
+            scope: crate::inventory::ListingScope::Nodes,
             parent: Some("libdir_a".into()),
             cursor: None,
         };
@@ -336,6 +429,7 @@ mod tests {
         assert!(
             s.page_url(
                 &PageTask {
+                    scope: crate::inventory::ListingScope::Nodes,
                     parent: None,
                     cursor: None
                 },

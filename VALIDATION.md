@@ -4,7 +4,7 @@ Documentation reviewed against the current source on November 16, 2026. This fil
 
 ## Latest recorded checks
 
-- 36 Rust unit tests passed.
+- 40 Rust unit tests passed.
 - JavaScript regression groups passed: preflight comparisons, Trash verification and pagination, the listing fetch (bounded retry, backoff, slim rows), hover lifecycle/retry behavior, Shift-click ranges, queue visibility with whole-collection filtering/sorting/caching, size and file-kind formatting, and JPG content fallback.
 - JavaScript syntax checks, `cargo fmt --check`, strict Clippy, and the release build (with path remapping) passed.
 - Startup smoke testing passed on the release build. Comparing the checkout before and after startup found no newly created files there.
@@ -13,7 +13,7 @@ Documentation reviewed against the current source on November 16, 2026. This fil
 
 Not verified against the live service in a recorded test:
 
-- The larger listing page sizes and concurrent folder reads. Their fallback (step down to the node-listing service default with no size parameter) is covered by unit tests only. The scan-complete status line reports pages and seconds so the effect can be seen on a real Library.
+- Larger-than-50 file pages and large-scale concurrent folder reads. Their fallback (step down to the node-listing service default with no size parameter) is covered by unit tests only. The scan-complete status line reports pages and seconds so the effect can be seen on a real Library.
 - The direct Trash lookup. ChatGPT's own client sends the ID filter (`allowlist_ids`) and the name search (`q`) in the same listing request it uses for Trash, but whether they are honoured together with `trashed_only` is unconfirmed. If they are not, the script learns that on the first file and reads the complete Trash listing instead; the mocked harness asserts that it then sends no filtered requests at all.
 - Trash and restore with the current confirmation reads. Each file still gets exactly one mutation, in the same sequence.
 
@@ -101,6 +101,16 @@ Reassess and reopen the alert if Linux support is added, target/dependency confi
 
 The live signed-in Library was observed issuing `POST /backend-api/files/library` without issuing the legacy initial `GET /backend-api/files/library/nodes` request. Requiring only the latter left the scanner waiting for a session until its connection timeout, even though the embedded browser displayed files.
 
-Session discovery now recognizes both request forms on the exact HTTPS ChatGPT origin. The POST request supplies session headers only; its search/filter body is not retained. The existing nodes endpoint remains the scan transport. A full live scan completed successfully with the corrected discovery logic, including folder traversal, without reauthentication or cloud mutations. Personal filenames, IDs, totals, and session values are intentionally omitted here.
+Session discovery now recognizes both request forms on the exact HTTPS ChatGPT origin. The POST request supplies session headers only; its search/filter body is not retained. The existing nodes endpoint remained usable and restored scanning in that fix; the faster hybrid scanner documented below now uses it for folder discovery and compatibility fallback. A full live scan completed successfully with the corrected discovery logic, including folder traversal, without reauthentication or cloud mutations. Personal filenames, IDs, totals, and session values are intentionally omitted here.
 
 A regression test covers current/legacy discovery, pagination-bearing requests, and rejection of unrelated hosts, ports, methods, and mutation paths. Rust tests, strict Clippy, and the JavaScript regressions pass. This successful listing test does not change the separate unverified-live-mutation limitations described above.
+
+## Verified faster file listing
+
+A read-only live comparison traversed the full legacy node listing, all pages of the 50-item POST listing, and the folder-only node listing. File ID sets and every normalized metadata field matched exactly: no missing, extra, duplicate, or changed files. Folder metadata matched exactly as well. A second complete POST listing produced the same result. The combined POST/folder traversal took less than half the legacy traversal time in that comparison; exact private inventory counts and timings remain outside this repository.
+
+The default scanner now combines the verified 50-item POST file listing with folder-only discovery. It keeps separate cursor namespaces, waits for both traversals, and falls back to a fresh legacy scan after invalid/refused fast responses. Unit tests cover nested folder metadata, completion with outstanding requests, cursor namespace separation, ignored scopes, repeated files, and discarding partial fast results before fallback. The JavaScript transport harness verifies POST body preservation and bounded retry as well as the legacy GET behavior.
+
+This comparison verified listing and metadata equivalence, not mutation speed or live deletion/restore behavior. No cloud files were changed during the investigation. A successful 100-item first-page probe was not used to claim full coverage or to increase the production page size.
+
+The updated application also completed a full live hybrid scan with the same file total and folder metadata as the reference traversal. Its end-to-end elapsed time was less than half the earlier application scan in this session. Exact account-level totals remain in the private comparison report, not in source documentation.

@@ -1,6 +1,8 @@
 # GPT File Browser
 
-A Windows desktop file manager for your ChatGPT Library, built in Rust. No Chrome extension or .NET runtime is required. It requires the Microsoft WebView2 Runtime (version 123 or newer; the Evergreen runtime on Windows 10/11 already is) on the computer running the app.
+An unofficial Windows desktop file manager for your ChatGPT Library and storage. Search the full indexed collection, sort by file size or modified date, preview images, and queue bulk moves to Trash or restores. Built in Rust with Microsoft WebView2. No Chrome extension or .NET runtime is required. It requires the Microsoft WebView2 Runtime (version 123 or newer; the Evergreen runtime on Windows 10/11 already is) on the computer running the app.
+
+This is an independent project, not affiliated with or endorsed by OpenAI. It uses your signed-in ChatGPT browser session, not an OpenAI API key. Service changes may require updates; see [validation coverage and limitations](VALIDATION.md).
 
 ## Open and use
 
@@ -123,3 +125,9 @@ The source ignore rules exclude local secrets, profiles, reports, binaries, and 
 - Keep real account values out of comments, fixtures, source documentation, and commits. Runtime receipts are private artifacts.
 
 Module/function comments explain these rules near their implementations. When changing embedded browser scripts, run both Rust and Node checks: the Node harness executes extracted production script text rather than a separately maintained copy. UI logic it runs is delimited by `// #region` markers in the two script files; keep those regions self-contained.
+
+## Feedback and forks
+
+Forks are welcome. This repository does not accept pull requests; pull request creation is disabled. Report reproducible bugs or request features through [GitHub Issues](https://github.com/hayesadeai-commits/gpt-file-browser/issues).
+
+Do not attach browser profiles, authentication headers, account inventories, or private file contents to public issues. Report sensitive security findings through [private vulnerability reporting](https://github.com/hayesadeai-commits/gpt-file-browser/security/advisories/new).

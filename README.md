@@ -21,7 +21,7 @@ The sidebar shows how much of your ChatGPT storage is used once a scan has conne
 ## Features and boundaries
 
 - Complete cursor pagination and recursive Library-folder traversal, including hidden files.
-- Fast listing: up to six folders are read at the same time (each folder's own pages stay in order), and the scan asks for larger pages than ChatGPT's default of about 20 items. ChatGPT's own client never requests a page size, so this is an optimization the service may refuse: a page that fails at an unconfirmed size restarts the scan one size smaller (100, then 50, then the service default), ending at exactly the request ChatGPT itself makes. Throttling and gateway errors (HTTP 429/502/503/504) are retried briefly instead of failing the scan. The completion message reports pages and seconds.
+- Fast listing: up to six folders are read at the same time (each folder's own pages stay in order), and the scan asks for larger pages than ChatGPT's default of about 20 items. Larger node-listing pages are an optimization the service may ignore or refuse: a page that fails at an unconfirmed size restarts the scan one size smaller (100, then 50, then the service default with no limit parameter). Throttling and gateway errors (HTTP 429/502/503/504) are retried briefly instead of failing the scan. The completion message reports pages and seconds.
 - Files and images in ChatGPT storage; connected-provider roots such as Google Drive are excluded.
 - Native-style file-browser layout that follows the Windows light/dark setting: sidebar navigation with file counts and a storage meter, an edge-to-edge file table, and a batch progress strip whose details stay collapsed until opened. Attention counts stay visible.
 - Numeric size/date/name sorting, search, type/folder filters, cross-page multiselection and size totals.
@@ -43,7 +43,7 @@ The app stores its profiles and generated reports under `%LOCALAPPDATA%\GPTStora
 
 These files may contain credentials, filenames, and account identifiers. Keep them private. Chrome's profile is not imported or modified. If `LOCALAPPDATA` is missing or relative, startup fails instead of falling back to the project directory. Files saved through ChatGPT's native Download dialog go to the destination you choose.
 
-The app learns the Library request context from the signed-in page. Session headers remain in memory and are sent only to ChatGPT. A changed sign-in context invalidates completed scans and pending reviews. Credentials are excluded from CSV, action receipts and diagnostics.
+The app learns the Library request context from authenticated requests made by the signed-in page. Session discovery accepts both the current `POST /backend-api/files/library` request and legacy `GET /backend-api/files/library/nodes` requests; scanning then uses the supported nodes endpoint for cursor/folder traversal. Search terms and filters from a POST request are not copied into the scan. Session headers remain in memory and are sent only to ChatGPT. A changed sign-in context invalidates completed scans and pending reviews. Credentials are excluded from CSV, action receipts and diagnostics.
 
 **Diagnostics** provides optional sanitized response schemas. ChatGPT's observed web endpoints are not a supported public personal-storage API, so service changes may require an app update. Native ChatGPT actions remain available in the embedded browser.
 

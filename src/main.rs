@@ -58,10 +58,9 @@ enum AppEvent {
 }
 
 /// Listing page sizes to request, largest first; `None` is the service default.
-/// ChatGPT's own client never sends a size, so a larger page is an optimization the
+/// Legacy native node requests omit a size, so a larger page is an optimization the
 /// service is free to refuse. A page that fails at an unconfirmed size steps down one
-/// size and restarts the traversal, ending at exactly the request shape the native
-/// client uses. See `Scan::shrinks_for` for when a size is kept.
+/// size and restarts the traversal, ending at the default node-request shape. See `Scan::shrinks_for` for when a size is kept.
 const PAGE_SIZES: [Option<u32>; 3] = [Some(100), Some(50), None];
 /// Upper bound on overlapping listing requests. Each cursor chain stays sequential;
 /// only independent folders are read at the same time.

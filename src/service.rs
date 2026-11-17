@@ -19,6 +19,27 @@ pub struct Session {
     pub account: Option<String>,
 }
 
+/// Recognize authenticated Library listing traffic independently of the UI's
+/// choice of listing route. Current ChatGPT uses POST /library; older pages used
+/// GET /library/nodes. Both carry the same session headers. Never learn credentials
+/// from unrelated routes or hosts, and never inherit a POST search/filter body.
+pub fn observed_listing_context(method: &str, raw: &str) -> Option<String> {
+    let mut url = url::Url::parse(raw).ok()?;
+    if url.origin().ascii_serialization() != "https://chatgpt.com" {
+        return None;
+    }
+    match (method, url.path()) {
+        ("GET", "/backend-api/files/library/nodes") => Some(url.into()),
+        ("POST", "/backend-api/files/library") => {
+            url.set_path("/backend-api/files/library/nodes");
+            url.set_query(None);
+            url.set_fragment(None);
+            Some(url.into())
+        }
+        _ => None,
+    }
+}
+
 impl Session {
     /// Rebuild a native listing URL for a complete scan.
     /// Remove search/type/provider and paging filters inherited from the browser UI,
@@ -230,6 +251,35 @@ pub fn list_trash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_discovery_supports_current_and_legacy_listing_requests() {
+        assert_eq!(
+            observed_listing_context(
+                "POST",
+                "https://chatgpt.com/backend-api/files/library?q=private"
+            ),
+            Some("https://chatgpt.com/backend-api/files/library/nodes".into())
+        );
+        assert!(
+            observed_listing_context(
+                "GET",
+                "https://chatgpt.com/backend-api/files/library/nodes?cursor=next"
+            )
+            .is_some()
+        );
+        for url in [
+            "https://evil.test/backend-api/files/library",
+            "http://chatgpt.com/backend-api/files/library",
+            "https://chatgpt.com:444/backend-api/files/library",
+            "https://chatgpt.com/backend-api/files/library/files/example/restore",
+        ] {
+            assert!(observed_listing_context("POST", url).is_none());
+        }
+        assert!(
+            observed_listing_context("DELETE", "https://chatgpt.com/backend-api/files/library")
+                .is_none()
+        );
+    }
     #[test]
     fn full_scan_cannot_inherit_native_search_or_type_filters() {
         let s=Session{url:"https://chatgpt.com/backend-api/files/library/nodes?entry_surface=spaces&q=secret&categories=image&source=uploaded&include_files=false&include_hidden_files=false".into(),authorization:"not-exported".into(),account:None};

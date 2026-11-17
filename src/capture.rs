@@ -70,15 +70,9 @@ pub fn install(
                     .Headers()?
                     .Contains(w!("Authorization"), &mut has_auth)?;
                 let authenticated_header = has_auth.as_bool();
-                // Learn context from authenticated first-page Library requests, not arbitrary traffic.
-                // Headers remain in Session memory; only their presence enters diagnostics.
-                if method == "GET"
-                    && url::Url::parse(&url).ok().is_some_and(|u| {
-                        u.path() == "/backend-api/files/library/nodes"
-                            && !u
-                                .query_pairs()
-                                .any(|(k, _)| k == "parent_directory_id" || k == "cursor")
-                    })
+                // Session discovery must follow both legacy and current native listing traffic.
+                // Headers stay in memory; POST filters/search text are deliberately not retained.
+                if let Some(listing_url) = crate::service::observed_listing_context(&method, &url)
                     && authenticated_header
                 {
                     let mut auth_ptr = PWSTR::null();
@@ -96,7 +90,7 @@ pub fn install(
                         None
                     };
                     let _ = proxy.send_event(AppEvent::Session(crate::service::Session {
-                        url: url.clone(),
+                        url: listing_url,
                         authorization: take_pwstr(auth_ptr),
                         account,
                     }));

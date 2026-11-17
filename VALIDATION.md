@@ -4,7 +4,7 @@ Documentation reviewed against the current source on November 16, 2026. This fil
 
 ## Latest recorded checks
 
-- 35 Rust unit tests passed.
+- 36 Rust unit tests passed.
 - JavaScript regression groups passed: preflight comparisons, Trash verification and pagination, the listing fetch (bounded retry, backoff, slim rows), hover lifecycle/retry behavior, Shift-click ranges, queue visibility with whole-collection filtering/sorting/caching, size and file-kind formatting, and JPG content fallback.
 - JavaScript syntax checks, `cargo fmt --check`, strict Clippy, and the release build (with path remapping) passed.
 - Startup smoke testing passed on the release build. Comparing the checkout before and after startup found no newly created files there.
@@ -13,7 +13,7 @@ Documentation reviewed against the current source on November 16, 2026. This fil
 
 Not verified against the live service in a recorded test:
 
-- The larger listing page sizes and concurrent folder reads. Their fallback (step down to the service default, which is the request ChatGPT's own client sends) is covered by unit tests only. The scan-complete status line reports pages and seconds so the effect can be seen on a real Library.
+- The larger listing page sizes and concurrent folder reads. Their fallback (step down to the node-listing service default with no size parameter) is covered by unit tests only. The scan-complete status line reports pages and seconds so the effect can be seen on a real Library.
 - The direct Trash lookup. ChatGPT's own client sends the ID filter (`allowlist_ids`) and the name search (`q`) in the same listing request it uses for Trash, but whether they are honoured together with `trashed_only` is unconfirmed. If they are not, the script learns that on the first file and reads the complete Trash listing instead; the mocked harness asserts that it then sends no filtered requests at all.
 - Trash and restore with the current confirmation reads. Each file still gets exactly one mutation, in the same sequence.
 
@@ -96,3 +96,11 @@ cargo tree --locked --offline --target x86_64-pc-windows-msvc -i glib
 The first command shows the GTK dependency chain; the Windows command reports nothing to print. This is target exclusion, not a claim that the affected library has been patched. The specific alert is dismissed as **vulnerable code is not used** for the current Windows build. Dependency alerts, secret scanning, push protection, and private vulnerability reporting remain enabled.
 
 Reassess and reopen the alert if Linux support is added, target/dependency configuration changes bring glib into a supported build, or new evidence contradicts this exclusion. A Linux build must address the affected dependency before it is supported or distributed.
+
+## Library session discovery compatibility
+
+The live signed-in Library was observed issuing `POST /backend-api/files/library` without issuing the legacy initial `GET /backend-api/files/library/nodes` request. Requiring only the latter left the scanner waiting for a session until its connection timeout, even though the embedded browser displayed files.
+
+Session discovery now recognizes both request forms on the exact HTTPS ChatGPT origin. The POST request supplies session headers only; its search/filter body is not retained. The existing nodes endpoint remains the scan transport. A full live scan completed successfully with the corrected discovery logic, including folder traversal, without reauthentication or cloud mutations. Personal filenames, IDs, totals, and session values are intentionally omitted here.
+
+A regression test covers current/legacy discovery, pagination-bearing requests, and rejection of unrelated hosts, ports, methods, and mutation paths. Rust tests, strict Clippy, and the JavaScript regressions pass. This successful listing test does not change the separate unverified-live-mutation limitations described above.

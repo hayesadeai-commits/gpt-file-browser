@@ -81,3 +81,18 @@ Queued multi-batch behavior is covered by unit tests and mocked UI execution. No
 The root license and Cargo package metadata declare MIT for this project's own code. The third-party notice generator resolves the locked Windows dependency graph, includes build dependencies, and preserves upstream license/copyright/notice texts with SHA-256 digests. Missing WebView2 crate licenses are taken from the exact crate revisions; the native loader notice is taken from its official SDK package license. Rust standard-library notices come from the installed toolchain's copyright bundle.
 
 Run `python scripts/generate_notices.py --check` and `cargo package --list --allow-dirty` to check reproducibility and packaging. Source and executable distributions must keep `LICENSE`, `THIRD_PARTY_NOTICES.md`, and all referenced `third-party/` files. This is scoped to the recorded dependencies, Windows target, and toolchain; updates require a renewed check.
+
+## Reviewed advisory: glib on non-Windows targets
+
+On November 16, 2026, Dependabot alert [#1](https://github.com/hayesadeai-commits/gpt-file-browser/security/dependabot/1) was reviewed for [GHSA-wrw7-89jp-8q8g / RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html), affecting `glib >=0.15.0, <0.20.0`.
+
+`Cargo.lock` includes `glib 0.18.5` through the Linux GTK dependencies of Tao/Wry. The supported Windows target (`x86_64-pc-windows-msvc`) does not resolve or compile this crate. This can be checked without downloading dependencies:
+
+```powershell
+cargo tree --locked --offline --target all -i glib
+cargo tree --locked --offline --target x86_64-pc-windows-msvc -i glib
+```
+
+The first command shows the GTK dependency chain; the Windows command reports nothing to print. This is target exclusion, not a claim that the affected library has been patched. The specific alert is dismissed as **vulnerable code is not used** for the current Windows build. Dependency alerts, secret scanning, push protection, and private vulnerability reporting remain enabled.
+
+Reassess and reopen the alert if Linux support is added, target/dependency configuration changes bring glib into a supported build, or new evidence contradicts this exclusion. A Linux build must address the affected dependency before it is supported or distributed.

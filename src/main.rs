@@ -17,6 +17,7 @@ mod inventory;
 mod preview;
 mod schema;
 mod service;
+mod window_state;
 
 use schema::Observation;
 use serde_json::{Value, json};
@@ -78,20 +79,20 @@ const SPACE_URL: &str = "https://chatgpt.com/space?tab=all";
 const HOME_URL: &str = "https://chatgpt.com/";
 
 // Status-line texts. Kept together so the wording stays consistent across handlers.
-const MSG_BUSY: &str = "Wait for the current operation to finish.";
+const MSG_BUSY: &str = "Please wait for the current task to finish.";
 const MSG_CONNECTING: &str =
-    "Connecting to your signed-in Library. If this stalls, open ChatGPT and sign in.";
+    "Connecting to your Library. If this takes too long, open Browser and sign in to ChatGPT.";
 const MSG_CONNECT_FAILED: &str =
     "Could not connect to Library. Open ChatGPT, sign in, then scan again.";
 const MSG_SCAN_STOPPED: &str = "Scan stopped. These results are incomplete.";
-const MSG_CONTEXT_CHANGED: &str = "Sign-in context changed. Scan again.";
-const MSG_SMALLER_PAGES: &str =
-    "A larger listing page failed. Restarting the scan with smaller pages…";
+const MSG_CONTEXT_CHANGED: &str =
+    "Your ChatGPT sign-in changed. Refresh the file list to continue.";
+const MSG_SMALLER_PAGES: &str = "Trying another way to load your files…";
 const MSG_NAV_PAUSED_JOB: &str =
-    "ChatGPT navigation is paused while queued file changes are processing.";
+    "Please wait until your file changes finish before browsing ChatGPT.";
 const MSG_NAV_PAUSED_LISTING: &str =
-    "ChatGPT navigation is paused while files are being listed. Stop the scan to browse.";
-const MSG_CLOSING: &str = "Finishing in-flight file checks before closing…";
+    "Your files are still loading. Stop the scan if you want to browse ChatGPT now.";
+const MSG_CLOSING: &str = "Checking the files already started before closing…";
 
 /// A line for the always-visible status area. Alerts are refusals and failures the
 /// user needs to notice; the shell renders them more prominently than progress.
@@ -322,7 +323,7 @@ impl Trash {
         self.complete = false;
         self.rows.clear();
         self.cursors.clear();
-        self.error = Some("Sign-in context changed. Reload Trash.".into());
+        self.error = Some("Your ChatGPT sign-in changed. Reload Trash to continue.".into());
     }
 }
 
@@ -403,8 +404,6 @@ fn publish_job(shell: &wry::WebView, job: &changes::Job, id: u64, sent: &mut usi
         "requests_sent": job.requests_sent,
         "awaiting_confirmation": job.confirmations.len(),
         "sending": job.current.len().saturating_sub(job.confirmations.len()),
-        "confirmation_limit": changes::UNCONFIRMED_LIMIT,
-        "confirmation_backpressure": !job.stop && !job.remaining.is_empty() && job.current.len()>=changes::UNCONFIRMED_LIMIT,
         "confirmation_rows": job.confirmations.iter().filter_map(|(id,c)| job.current.get(id).map(|f|json!({"id":id,"name":f.name,"verifying":c.verifying}))).collect::<Vec<_>>(),
         "skipped": skipped,
         "attention": job.outcomes.len() - verified - skipped,
@@ -523,7 +522,7 @@ fn journal(root: &Path, job: &changes::Job, nonce: u64) -> Result<(), String> {
     diagnostics::record(
         root,
         "queue_state",
-        json!({"batch":nonce,"sent":job.requests_sent,"unfinished":job.current.len(),"confirming":job.confirmations.len(),"queued":job.remaining.len(),"verified":job.outcomes.iter().filter(|o|o.status=="verified").count(),"attention":job.outcomes.iter().filter(|o|o.status=="uncertain"||o.status=="failed").count(),"stopped":job.stop}),
+        json!({"batch":nonce,"sent":job.requests_sent,"unfinished":job.current.len(),"confirming":job.confirmations.len(),"sending":job.current.len().saturating_sub(job.confirmations.len()),"checking":job.confirmations.values().filter(|c|c.verifying).count(),"waiting_for_check":job.confirmations.values().filter(|c|!c.verifying).count(),"queued":job.remaining.len(),"verified":job.outcomes.iter().filter(|o|o.status=="verified").count(),"attention":job.outcomes.iter().filter(|o|o.status=="uncertain"||o.status=="failed").count(),"stopped":job.stop}),
     );
     let report = job_receipt(job);
     let temp = dir.join(format!("actions-{nonce}.tmp"));
@@ -533,7 +532,7 @@ fn journal(root: &Path, job: &changes::Job, nonce: u64) -> Result<(), String> {
     )
     .map_err(|_| "Could not save the action log")?;
     std::fs::rename(&temp, dir.join(format!("actions-{nonce}.json")))
-        .map_err(|_| "Could not commit the action log".into())
+        .map_err(|_| "Could not finish saving the record of your changes".into())
 }
 
 /// Preserve all outstanding files even when responses finish out of order.
@@ -551,7 +550,7 @@ fn job_receipt(job: &changes::Job) -> Value {
 }
 
 /// Pump independent send/readback pools, journaling reservations before mutation.
-/// The shared unfinished budget stays reserved until readback; reads never resend mutations.
+/// Files stay reserved until readback, without holding send slots; reads never resend mutations.
 fn change_next(
     browser: &wry::WebView,
     session: &service::Session,
@@ -691,10 +690,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
         .with_title("GPT File Browser")
+        .with_visible(false)
         .with_window_icon(Some(tao::window::Icon::from_rgba(icon::rgba(64), 64, 64)?))
         .with_inner_size(tao::dpi::LogicalSize::new(1280., 720.))
         .with_min_inner_size(tao::dpi::LogicalSize::new(980., 680.))
         .build(&event_loop)?;
+    let mut placement = window_state::Placement::restore(&window, &root);
+    let smoke_mode = std::env::args().any(|a| a == "--smoke-test");
+    window.set_visible(!smoke_mode);
     let size = window.inner_size().to_logical::<f64>(window.scale_factor());
     // Match the stylesheet's canvas color so the window does not flash white while loading.
     let canvas = if window.theme() == Theme::Dark {
@@ -800,6 +803,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .any(|a| a == "--smoke-test")
         .then(|| Instant::now() + Duration::from_secs(5));
     let mut bridge_smoke_ok = false;
+    let mut smoke_recorded = false;
     // Every callback is serialized here. The deadlines wake an otherwise idle event loop.
     event_loop.run(move |event, _, flow| {
         *flow = smoke_deadline
@@ -812,18 +816,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             publish_inventory(&shell, &scan);
         }
         if smoke_deadline.is_some_and(|t| Instant::now() >= t) {
-            if !shell_ready || !bridge_smoke_ok {
+            let on_screen=window_state::Placement::is_on_screen(&window);
+            if !smoke_recorded {diagnostics::record(&root,"window_smoke",json!({"within_work_area":on_screen}));smoke_recorded=true;}
+            if !shell_ready || !bridge_smoke_ok || !on_screen {
                 std::process::exit(2);
             }
             *flow = ControlFlow::Exit;
         }
         let mut status: Option<Note> = None;
         match event {
+            Event::WindowEvent {event:WindowEvent::Moved(_),..} => {if !smoke_mode {placement.save(&window,&root);}},
             // Finish every in-flight verification before closing; skip unstarted files.
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                if !smoke_mode {placement.save(&window,&root);}
                 if batches.busy() {
                     if let Some(j) = batches.job.as_mut() {
                         j.stop = true;
@@ -840,6 +848,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. },
                 ..
             } => {
+                if !smoke_mode {placement.save(&window,&root);}
                 // The shell re-measures its browser pane and reports it after this resize.
                 let sz = window.inner_size().to_logical::<f64>(window.scale_factor());
                 let _ = shell.set_bounds(bounds(0., 0., sz.width, sz.height));
@@ -953,7 +962,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             publish_trash(&shell, &trash);
                         } else {
-                            status = alert("Scan your Library first to establish the connection.");
+                            status = alert("Load your files first so the app can connect to your Library.");
                         }
                     }
                     "stop_actions" => {
@@ -1009,16 +1018,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 let f = source
                                     .get(id)
-                                    .ok_or("Selection is stale. Refresh the list.")?;
+                                    .ok_or("The selected files may have changed. Refresh the list.")?;
                                 if f.action_blocked {
                                     return Err(format!(
-                                        "{} needs a refresh to verify its previous action before retrying.",
+                                        "Refresh the list before trying {} again. Its last change has not been confirmed.",
                                         f.name
                                     ));
                                 }
                                 if !changes::eligible(f) {
                                     return Err(format!(
-                                        "{} must be managed in ChatGPT (not an owned ordinary file).",
+                                        "Open ChatGPT to manage {}. This app cannot change that kind of item.",
                                         f.name
                                     ));
                                 }
@@ -1116,13 +1125,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "capture:on" => {
                         enabled.set(true);
                         status = info(
-                            "Inspection on. Open Library, browse a folder, and load more items.",
+                            "Recording troubleshooting details. Open Library in the Browser tab and browse your files.",
                         );
                     }
                     "capture:off" => {
                         enabled.set(false);
                         epoch.set(epoch.get() + 1);
-                        status = info("Inspection paused.");
+                        status = info("Troubleshooting recording paused.");
                     }
                     "clear" => {
                         epoch.set(epoch.get() + 1);
@@ -1302,18 +1311,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             publish_inventory(&shell, &scan);
                         }
                         status = if restarted && scan.running {
-                            info(if fast_fallback {"Fast listing unavailable. Restarting with compatible folder traversal…"} else {MSG_SMALLER_PAGES})
+                            info(if fast_fallback {"Trying another way to load your files…"} else {MSG_SMALLER_PAGES})
                         } else if scan.running {
                             info(format!(
-                                "Scanning… {} entries across {} pages.",
-                                scan.inv.rows.len(),
-                                scan.inv.pages
+                                "Finding your files… {} found.",
+                                scan.file_count()
                             ))
                         } else if scan.inv.complete {
                             info(format!(
-                                "Scan complete: {} files in {} pages ({:.1} s).",
+                                "Found {} files in {:.1} seconds.",
                                 scan.file_count(),
-                                scan.inv.pages,
                                 scan.started.map_or(0., |t| t.elapsed().as_secs_f64())
                             ))
                         } else {
@@ -1331,7 +1338,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     observations.borrow_mut().push(item);
                     call(&shell, "showEvidence", &json!(*observations.borrow()));
                     status = info(format!(
-                        "{} response structures observed. Complete inventory is not verified.",
+                        "{} troubleshooting entries recorded. Load your files separately to see the full list.",
                         observations.borrow().len()
                     ));
                 }
@@ -1413,7 +1420,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(s)=&session && let Err(e)=change_next(&browser,s,j,n,batches.lookup,&proxy,&root){status=alert(e);}
                         publish_job(&shell,j,n,&mut batches.sent);
                     }else{
-                        j.stop=true;let _=proxy.send_event(AppEvent::ChangeResult(n,id,Err("Request result missing confirmation context; refresh before retrying.".into())));
+                        j.stop=true;let _=proxy.send_event(AppEvent::ChangeResult(n,id,Err("We could not check whether this file moved. Refresh Library and Trash before trying again.".into())));
                     }
                 }
             }
@@ -1430,7 +1437,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let state = value["status"].as_str().unwrap_or("uncertain").to_string();
                     let message = value["message"]
                         .as_str()
-                        .unwrap_or("Unrecognized action result")
+                        .unwrap_or("We could not tell whether the change finished. Refresh before trying again.")
                         .to_string();
                     // Log a fixed outcome code, never the remote message or file identity.
                     diagnostics::record(&root,"file_result",json!({"batch":n,"outcome":match state.as_str(){"verified"=>"verified","failed"=>"failed","uncertain"=>"uncertain",_=>"unrecognized"}}));
@@ -1477,7 +1484,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if status.is_none() {
                         status = info(format!(
-                            "{} batch: {} verified, {} remaining.",
+                            "{}: {} confirmed, {} left.",
                             if trashing { "Trash" } else { "Restore" },
                             j.outcomes.iter().filter(|o| o.status == "verified").count(),
                             j.remaining.len() + j.current.len()

@@ -274,7 +274,7 @@ function paintSummary() {
   $('inventory').classList.toggle('trash', trash);
   $('view-title').textContent = trash ? 'Trash' : 'All files';
   $('view-meta').textContent = store.busy
-    ? (trash ? `Loading… ${plural(files, 'file')}` : `Scanning… ${plural(files, 'file')} · ${plural(store.pages, 'page')}`)
+    ? (trash ? `Loading… ${plural(files, 'file')}` : `Finding your files… ${plural(files, 'file')}`)
     : store.rows.size || store.complete ? parts.join(' · ') : '';
   $('notice').hidden = !store.error;
   $('notice-text').textContent = store.error || '';
@@ -615,8 +615,8 @@ window.showReview = r => {
   $('review-title').textContent = `${trash ? 'Move' : 'Restore'} ${count.toLocaleString()} ${noun}${trash ? ' to Trash' : ''}?`;
   $('review-total').textContent = `${bytesText(total)} in total` + (jobActive ? ' · runs after the batch in progress' : '');
   $('review-note').textContent = trash
-    ? 'ChatGPT removes trashed files permanently after 30 days. Until then they can be restored from Trash. This app never deletes files permanently. Four request slots and four verification slots run together, capped at 12 unfinished files. Stop waits for outstanding confirmations.'
-    : 'These files return to your Library. ChatGPT may reject a restore if your storage is full.';
+    ? 'ChatGPT removes trashed files permanently after 30 days. Until then they can be restored from Trash. This app never deletes files permanently. You can keep selecting files while this runs. If you stop, we will finish checking files already sent to Trash.'
+    : 'These files return to your Library. You may need to free up storage before restoring them.';
   const list = document.createDocumentFragment();
   for (const f of r.files) {
     const row = document.createElement('div'), name = document.createElement('span'), size = document.createElement('span');
@@ -667,7 +667,7 @@ window.showJob = data => {
     for(const file of data.confirmation_rows){
       const row=document.createElement('div'),name=document.createElement('span'),message=document.createElement('span');
       row.className='job-item';name.textContent=file.name;
-      message.textContent=file.verifying?'Request sent — verifying in Trash':'Request sent — awaiting confirmation';
+      message.textContent=file.verifying?'Sent to ChatGPT — checking Trash':'Sent to ChatGPT — waiting to check Trash';
       row.append(name,message);pending.append(row);
     }
     $('job-list').append(pending);
@@ -686,17 +686,16 @@ function paintJob() {
   if (!job) return;
   const trash = job.action === 'trash', done = job.verified + job.attention + job.skipped, total = done + job.remaining;
   const parts = [];
-  if (job.active) parts.push(job.stopping ? 'Finishing in-flight file checks…' : `${trash ? 'Moving to Trash' : 'Restoring'} · ${done.toLocaleString()} of ${total.toLocaleString()}`);
+  if (job.active) parts.push(job.stopping ? 'Checking the files already started…' : `${trash ? 'Moving to Trash' : 'Restoring'} · ${done.toLocaleString()} of ${total.toLocaleString()}`);
   else parts.push(`${job.verified.toLocaleString()} ${job.verified === 1 ? 'file' : 'files'} ${trash ? 'moved to Trash' : 'restored'}`);
   if(trash){
     parts.push(`${(job.requests_sent||0).toLocaleString()} requests sent`);
-    parts.push(`${job.verified.toLocaleString()} verified in Trash`);
-    if(job.awaiting_confirmation)parts.push(`${job.awaiting_confirmation} awaiting confirmation`);
+    parts.push(`${job.verified.toLocaleString()} confirmed in Trash`);
+    if(job.awaiting_confirmation)parts.push(`${job.awaiting_confirmation} waiting to be checked`);
     if(job.sending)parts.push(`${job.sending} sending`);
-    if(job.confirmation_backpressure&&!job.stopping)parts.push('Request queue paused at confirmation limit');
   }
   if (job.attention) parts.push(`${job.attention.toLocaleString()} ${job.attention === 1 ? 'needs' : 'need'} attention`);
-  if (job.skipped) parts.push(`${job.skipped.toLocaleString()} not attempted`);
+  if (job.skipped) parts.push(`${job.skipped.toLocaleString()} not started`);
   if (queuedBatchCount) parts.push(`${queuedBatchCount} more ${queuedBatchCount === 1 ? 'batch' : 'batches'} queued (${queuedFileCount.toLocaleString()} files)`);
   $('job-text').textContent = parts.join(' · ');
   $('job-bar').style.width = (total ? done / total * 100 : 100) + '%';
@@ -749,9 +748,9 @@ window.showUsage = usage => {
   $('usage-text').textContent = `${bytesText(used)} of ${bytesText(allowed)} used`;
 };
 const evidenceHelp = [
-  'Reports contain field names, types, and array counts.',
-  'Response values, request headers, and query strings are excluded. Unknown schema keys are redacted.',
-  'Only matching ChatGPT metadata paths are inspected. Empty results do not mean your Library is empty.',
+  'These details help troubleshoot problems connecting to ChatGPT.',
+  'Reports describe how ChatGPT organizes its replies. They leave out file details and sign-in information.',
+  'Only Library replies are checked. If nothing appears here, your Library may still have files.',
   'Saved reports go to the private reports folder under %LOCALAPPDATA%\\GPTStorageBrowser.',
 ].join('\n\n');
 window.showEvidence = items => {
@@ -761,7 +760,7 @@ window.showEvidence = items => {
   list.replaceChildren();
   if (!items.length) {
     const hint = document.createElement('p');
-    hint.textContent = 'No responses observed yet. Turn on inspection, then browse your Library in the ChatGPT view.';
+    hint.textContent = 'Nothing recorded yet. Turn on troubleshooting details, then open Library in the Browser tab.';
     list.append(hint);
     $('detail').textContent = evidenceHelp;
   }

@@ -36,8 +36,8 @@ pub struct Outcome {
     pub status: String,
     pub message: String,
 }
-/// Separate bounded send and confirmation queues. current reserves every unfinished
-/// file, including sends that have not replied, so the backlog cannot exceed the cap.
+/// Independent send and confirmation pools. current reserves every unfinished
+/// file; pending confirmations do not block new sends from the reviewed batch.
 /// Session material in Confirmation is deliberately never serialized to receipts.
 pub struct Job {
     pub action: Action,
@@ -50,7 +50,6 @@ pub struct Job {
 }
 pub const SEND_LIMIT: usize = 4;
 pub const VERIFY_LIMIT: usize = 4;
-pub const UNCONFIRMED_LIMIT: usize = 12;
 
 #[derive(Clone)]
 pub struct Confirmation {
@@ -150,7 +149,7 @@ pub fn validate_queue(
 }
 
 impl Job {
-    /// Convert a completed send into bounded pending verification without releasing its ID.
+    /// Convert a completed send into pending verification without releasing its ID.
     pub fn request_sent(&mut self, id: &str, receipt: Confirmation) -> bool {
         if self.action != Action::Trash
             || !self.current.contains_key(id)
@@ -171,7 +170,7 @@ impl Job {
         entry.verifying = true;
         Some((id.clone(), entry.clone()))
     }
-    /// Reserve a send slot and one position in the shared unfinished-file budget.
+    /// Reserve one of four send slots independently of pending confirmations.
     /// Confirmed sends leave this pool but retain their reservation until readback finishes.
     pub fn take_next(&mut self) -> Option<FileRow> {
         if self.stop {
@@ -190,9 +189,7 @@ impl Job {
         } else {
             1
         };
-        if self.current.len().saturating_sub(self.confirmations.len()) >= capacity
-            || self.current.len() >= UNCONFIRMED_LIMIT
-        {
+        if self.current.len().saturating_sub(self.confirmations.len()) >= capacity {
             return None;
         }
         while let Some(f) = self.remaining.pop_front() {
@@ -333,10 +330,10 @@ mod tests {
         assert_eq!(browser_integer(&serde_json::json!(200.0)), Some(200));
     }
     #[test]
-    fn independent_pools_obey_backpressure_and_drain_after_stop() {
+    fn independent_pools_continue_past_twelve_and_drain_after_stop() {
         let mut job = Job {
             action: Action::Trash,
-            remaining: (0..20).map(|i| row(&format!("libfile_{i}"))).collect(),
+            remaining: (0..24).map(|i| row(&format!("libfile_{i}"))).collect(),
             current: BTreeMap::new(),
             confirmations: BTreeMap::new(),
             requests_sent: 0,
@@ -354,7 +351,7 @@ mod tests {
             verifying: false,
         };
         // Four sends may overlap four readbacks; pending files retain reservations.
-        for _ in 0..3 {
+        for _ in 0..4 {
             let ids: Vec<_> = (0..SEND_LIMIT)
                 .map(|_| job.take_next().unwrap().id)
                 .collect();
@@ -365,13 +362,16 @@ mod tests {
             }
             while job.next_confirmation().is_some() {}
         }
-        assert_eq!(job.current.len(), UNCONFIRMED_LIMIT);
-        assert_eq!(job.requests_sent, 12);
+        assert_eq!(job.current.len(), 16);
+        assert_eq!(job.requests_sent, 16);
         assert_eq!(
             job.confirmations.values().filter(|c| c.verifying).count(),
             VERIFY_LIMIT
         );
-        assert!(job.take_next().is_none());
+        assert!(
+            job.take_next().is_some(),
+            "Pending readbacks must not stall sending"
+        );
         let id = job
             .confirmations
             .iter()
@@ -382,7 +382,9 @@ mod tests {
         job.confirmations.remove(&id);
         job.current.remove(&id);
         assert!(job.next_confirmation().is_some());
-        assert!(job.take_next().is_some());
+        for _ in 0..3 {
+            assert!(job.take_next().is_some());
+        }
         assert!(job.take_next().is_none());
         job.stop = true;
         assert!(job.take_next().is_none());
@@ -399,7 +401,7 @@ mod tests {
             job.next_confirmation().is_some(),
             "Stopping sends must still drain queued verification"
         );
-        assert_eq!(job.outcomes.len(), 7);
+        assert_eq!(job.outcomes.len(), 4);
     }
     #[test]
     fn lookup_hints_merge_only_explicit_answers() {

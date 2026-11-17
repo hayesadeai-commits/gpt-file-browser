@@ -115,7 +115,10 @@ impl Inventory {
             return Ok(None);
         }
         if self.pages + self.active >= MAX_PAGES {
-            return Err("Stopped after 10,000 pages; inventory is incomplete.".into());
+            return Err(
+                "There are too many files to finish loading in one go. This list is incomplete."
+                    .into(),
+            );
         }
         let Some(task) = self.queue.pop_front() else {
             return Ok(None);
@@ -124,7 +127,10 @@ impl Inventory {
             .visited
             .insert((task.scope, task.parent.clone(), task.cursor.clone()))
         {
-            return Err("The service repeated a pagination cursor; refresh is required.".into());
+            return Err(
+                "ChatGPT sent the same part of the list twice. Please refresh and try again."
+                    .into(),
+            );
         }
         self.active += 1;
         Ok(Some(task))
@@ -142,18 +148,20 @@ impl Inventory {
         let items = body
             .get("items")
             .and_then(Value::as_array)
-            .ok_or("The listing format changed (items missing).")?;
+            .ok_or("ChatGPT returned an unexpected file list. Please refresh and try again.")?;
         if !body
             .get("cursor")
             .is_some_and(|v| v.is_null() || v.is_string())
         {
-            return Err("The listing format changed (cursor missing).".into());
+            return Err(
+                "ChatGPT did not tell us whether more files remain. Please refresh and try again."
+                    .into(),
+            );
         }
         for item in items {
-            let id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or("An item has no stable ID.")?;
+            let id = item.get("id").and_then(Value::as_str).ok_or(
+                "ChatGPT returned a file we could not identify. Please refresh and try again.",
+            )?;
             // These are the actual owned Library ID forms observed in Space. External providers stay out.
             let folder = id.starts_with("libdir_");
             if !folder && !id.starts_with("libfile_") {
@@ -165,10 +173,16 @@ impl Inventory {
             if (task.scope == ListingScope::Files && folder)
                 || (task.scope == ListingScope::Folders && !folder)
             {
-                return Err("The service ignored the requested listing scope.".into());
+                return Err(
+                    "ChatGPT returned the wrong set of files. Trying another way to load them."
+                        .into(),
+                );
             }
             if task.scope == ListingScope::Files && self.rows.contains_key(id) {
-                return Err("The flat listing repeated a file; retrying a compatible traversal is required.".into());
+                return Err(
+                    "ChatGPT repeated a file in the list. Trying another way to load your files."
+                        .into(),
+                );
             }
             let row = parse_row(item)?;
             self.rows.insert(id.into(), row);
@@ -206,7 +220,7 @@ pub fn page_cursor(body: &Value) -> Result<Option<String>, String> {
         Some(Value::Null) => Ok(None),
         Some(Value::String(c)) if c.is_empty() => Ok(None),
         Some(Value::String(c)) => Ok(Some(c.clone())),
-        _ => Err("Listing pagination format changed (cursor missing or invalid).".into()),
+        _ => Err("ChatGPT did not tell us how to load the rest of the list. Please refresh and try again.".into()),
     }
 }
 

@@ -4,7 +4,7 @@ Documentation reviewed against the current source on November 16, 2026. This fil
 
 ## Latest recorded checks
 
-- 45 Rust unit tests passed.
+- 46 Rust unit tests passed.
 - JavaScript regression groups passed: preflight comparisons, Trash verification and pagination, the listing fetch (bounded retry, backoff, slim rows), hover lifecycle/retry behavior, Shift-click ranges, queue visibility with whole-collection filtering/sorting/caching, size and file-kind formatting, and JPG content fallback.
 - JavaScript syntax checks, `cargo fmt --check`, strict Clippy, and the release build (with path remapping) passed.
 - Startup smoke testing passed on the release build. Comparing the checkout before and after startup found no newly created files there.
@@ -117,12 +117,18 @@ The updated application also completed a full live hybrid scan with the same fil
 
 ## Bounded deletion concurrency
 
-Trash batches now run four request slots and four independent verification slots simultaneously, retaining the existing preflight and readback checks. At most 12 files can remain unfinished. Each request is associated with its batch nonce and file ID. A send slot is released after the mutation response; the file remains reserved until its verified/failed/uncertain result. Progress distinguishes requests sent from verified moves. Restores remain sequential. Stop/failure/context changes prevent new dispatch and allow already-started verification to complete; the next batch cannot start while any file remains in flight.
+Trash batches now run four request slots and four independent verification slots simultaneously, retaining the existing preflight and readback checks. Pending confirmations do not impose a separate backlog cap on sending. Each request is associated with its batch nonce and file ID. A send slot is released after the mutation response; the file remains reserved until its verified/failed/uncertain result. Progress distinguishes requests sent from verified moves. Restores remain sequential. Stop/failure/context changes prevent new dispatch and allow already-started verification to complete; the next batch cannot start while any file remains in flight.
 
-The Rust tests exercise independent send/readback capacity, the 12-file backlog cap, duplicate send callbacks, readback draining after Stop, receipt credential exclusion, the four-request cap, out-of-order completion, duplicate prevention, stopping with another file outstanding, receipt persistence for all active files, and sequential restore. The Node harness runs the actual per-file script with a simulated delayed service and asserts that each overlapping file receives its own preflight, exactly one delete, and positive Trash readback. A controlled-latency comparison demonstrated lower elapsed time with four in flight; this is not a live-service throughput measurement. No cloud files were deleted for this change.
+The Rust tests exercise independent send/readback capacity, continued sending beyond 12 unfinished files, duplicate send callbacks, readback draining after Stop, receipt credential exclusion, the four-request cap, out-of-order completion, duplicate prevention, stopping with another file outstanding, receipt persistence for all active files, and sequential restore. The Node harness runs the actual per-file script with a simulated delayed service and asserts that each overlapping file receives its own preflight, exactly one delete, and positive Trash readback. A controlled-latency comparison demonstrated lower elapsed time with four in flight; this is not a live-service throughput measurement. No cloud files were deleted for this change.
 
 ## Confirmation bridge and bounded diagnostic log
 
 The send/verify handoff accepts exact safe integer values encoded as either integer or floating-point JSON. Fractional, negative, oversized and nonnumeric values remain rejected. The startup smoke test now exercises this handoff through the actual WebView2 DevTools bridge using synthetic data without a network request or cloud mutation. Unit tests cover numeric encodings and log retention by age, size and malformed lines. The automatic diagnostic log is capped at 30 days and 10 MiB; it records only event codes and aggregate fields outside the checkout.
 
 The Windows smoke test reproduced the cause: DevTools returned the timestamp as floating-point JSON while the HTTP status was integer JSON. The corrected parser accepted both and the live bridge smoke test passed. This test performs no cloud changes.
+
+## Window placement and wording
+
+Window bounds are saved outside the checkout. Placement tests cover taskbar clearance, a disconnected display, oversized saved bounds, and negative monitor coordinates. Smoke tests do not overwrite saved window settings. Helper text, progress messages, browser sign-in guidance and troubleshooting instructions use plain English. Queue logs distinguish active sends, active checks and waiting checks without recording file identities.
+
+The Windows startup smoke test also checks the actual window frame against the monitor work area, including taskbar clearance, and passed. The existing diagnostic log parsed successfully and its queue counts were internally consistent.

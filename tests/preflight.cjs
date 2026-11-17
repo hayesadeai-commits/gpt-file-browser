@@ -186,7 +186,7 @@ async function change(action,options,lookup){
    return {status,json:async()=>body};
   }});
   if(mode==='large'){assert.equal(result.status,'verified');assert.equal(reads,101);assert.equal(mutations,1);assert.deepEqual(hints(result.lookup),{by_id:false,by_name:false,node:null});}
-  else {assert.equal(result.status,'failed');assert.equal(mutations,0);if(mode==='exhausted'){assert.equal(reads,1000);assert.match(result.message,/exceeded 1,000/);}}
+  else {assert.equal(result.status,'failed');assert.equal(mutations,0);if(mode==='exhausted'){assert.equal(reads,1000);assert.match(result.message,/too large to check/);}}
  }
  console.log('Restore checks passed: one-request lookup, large Trash, malformed/repeated/exhausted pagination.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
@@ -409,7 +409,7 @@ async function change(action,options,lookup){
  const data={id:1,action:'trash',active:true,offset:0,verified:0,attention:0,skipped:0,remaining:1,requests_sent:1,awaiting_confirmation:1,outcomes:[],confirmation_rows:[{id:'libfile_fixture',name:'fixture.png',verifying:true}]};
  context.window.showJob(data);
  assert(reservedIds.has('libfile_fixture'));
- assert.match($('job-text').textContent,/1 requests sent.*0 verified in Trash/);
+ assert.match($('job-text').textContent,/1 requests sent.*0 confirmed in Trash/);
  assert.equal($('job-bar').style.width,'0%');assert.equal($('job-toggle').hidden,false);
  context.window.showJob({...data,active:false,verified:1,remaining:0,awaiting_confirmation:0,confirmation_rows:[],outcomes:[{id:'libfile_fixture',name:'fixture.png',status:'verified',message:'Verified'}]});
  assert(!reservedIds.has('libfile_fixture'));assert.equal($('job-bar').style.width,'100%');

@@ -56,12 +56,12 @@
       cursor = r.body.cursor;
       if (!cursor) return null;
       if (seen.has(cursor)) {
-        trashProblem = 'Trash repeated a pagination cursor.';
+        trashProblem = 'ChatGPT sent the same part of Trash twice, so we could not finish checking it.';
         return null;
       }
       seen.add(cursor);
     }
-    trashProblem = 'Trash verification exceeded 1,000 pages. No further changes were attempted.';
+    trashProblem = 'Trash is too large to check in one go. No more files were changed.';
     return null;
   }
 
@@ -147,7 +147,7 @@
     const n = before.body;
     const changed = (__PREFLIGHT__)(f, n);
     if (changed) return {status: 'failed', message: 'The file changed since scanning (' + changed + '). Refresh and review it again.', lookup};
-    if (trashing && isTrashed(n) || !trashing && !isTrashed(n)) return {status: 'failed', message: 'File state changed since scanning. Refresh before retrying.', lookup};
+    if (trashing && isTrashed(n) || !trashing && !isTrashed(n)) return {status: 'failed', message: 'This file has moved or been restored since the list was loaded. Refresh before trying again.', lookup};
 
     // Send exactly one mutation. A timeout can occur after the service commits it.
     sent = Date.now();
@@ -167,7 +167,7 @@
   if (a.phase === 'send') return {status:'sent', sent, mutation_status:mutation?.status ?? null, lookup};
 
   // Verify state independently of the mutation HTTP code; successful transport is not proof.
-  const verified = node => ({status: 'verified', message: trashing ? 'Moved to Trash and verified.' : 'Restored and verified.', node, lookup});
+  const verified = node => ({status: 'verified', message: trashing ? 'Confirmed in Trash.' : 'Confirmed back in your Library.', node, lookup});
   let after = null;
   /** The file's own node, if it shows the state this request was meant to produce. */
   async function readNode() {

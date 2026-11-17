@@ -163,7 +163,7 @@ function paintHoverPreview(data) {
   }
   const label = document.createElement('div');
   label.className = 'caption';
-  label.textContent = data ? hoverTarget.dataset.name : 'Larger preview unavailable';
+  label.textContent = data ? hoverTarget.dataset.name : 'This image could not be previewed';
   hoverPanel.append(label);
   hoverPanel.hidden = false;
   placeHoverPreview();

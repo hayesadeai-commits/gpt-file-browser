@@ -2,6 +2,8 @@
 
 An unofficial Windows desktop file manager for your ChatGPT Library and storage. Search the full indexed collection, sort by file size or modified date, preview images, and queue bulk moves to Trash or restores. Built in Rust with Microsoft WebView2. No Chrome extension or .NET runtime is required. It requires the Microsoft WebView2 Runtime (version 123 or newer; the Evergreen runtime on Windows 10/11 already is) on the computer running the app.
 
+Download the portable Windows x64 app from [GitHub Releases](https://github.com/hayesadeai-commits/gpt-file-browser/releases/latest). Extract the ZIP and open **GPT File Browser.exe**. Version 1.0.0 includes the MIT license and third-party notices. No sign-in data is included; sign in to your own ChatGPT account on first use.
+
 This is an independent project, not affiliated with or endorsed by OpenAI. It uses your signed-in ChatGPT browser session, not an OpenAI API key. Service changes may require updates; see [validation coverage and limitations](VALIDATION.md).
 
 ## Open and use

@@ -132,3 +132,7 @@ The Windows smoke test reproduced the cause: DevTools returned the timestamp as 
 Window bounds are saved outside the checkout. Placement tests cover taskbar clearance, a disconnected display, oversized saved bounds, and negative monitor coordinates. Smoke tests do not overwrite saved window settings. Helper text, progress messages, browser sign-in guidance and troubleshooting instructions use plain English. Queue logs distinguish active sends, active checks and waiting checks without recording file identities.
 
 The Windows startup smoke test also checks the actual window frame against the monitor work area, including taskbar clearance, and passed. The existing diagnostic log parsed successfully and its queue counts were internally consistent.
+
+## Version 1.0.0 release
+
+The release package is assembled from an explicit allowlist: the path-remapped Windows executable, README, MIT license, third-party notices and bundled license texts. Browser profiles, logs, settings, receipts, build caches and Git metadata are excluded. Cargo and Windows executable resource versions both use 1.0.0.

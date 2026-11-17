@@ -51,11 +51,19 @@ fn main() {
     directory.extend(images);
     let ico = out.join("gpt-file-browser.ico");
     fs::write(&ico, directory).unwrap();
+    // Cargo is the single source of truth for Explorer's product/file versions.
+    let version = env::var("CARGO_PKG_VERSION").unwrap();
+    let numeric_version = format!(
+        "{},{},{},0",
+        env::var("CARGO_PKG_VERSION_MAJOR").unwrap(),
+        env::var("CARGO_PKG_VERSION_MINOR").unwrap(),
+        env::var("CARGO_PKG_VERSION_PATCH").unwrap()
+    );
     let rc_file = out.join("app-icon.rc");
     fs::write(
         &rc_file,
         format!(
-            "1 ICON \"{}\"\n1 VERSIONINFO\nFILEVERSION 0,1,0,0\nPRODUCTVERSION 0,1,0,0\nFILEOS 0x40004\nFILETYPE 0x1\nBEGIN\n BLOCK \"StringFileInfo\"\n BEGIN\n  BLOCK \"040904b0\"\n  BEGIN\n   VALUE \"FileDescription\", \"GPT File Browser\\0\"\n   VALUE \"ProductName\", \"GPT File Browser\\0\"\n   VALUE \"InternalName\", \"gpt-file-browser\\0\"\n   VALUE \"OriginalFilename\", \"GPT File Browser.exe\\0\"\n   VALUE \"FileVersion\", \"0.1.0\\0\"\n   VALUE \"ProductVersion\", \"0.1.0\\0\"\n  END\n END\n BLOCK \"VarFileInfo\"\n BEGIN\n  VALUE \"Translation\", 0x409, 1200\n END\nEND\n",
+            "1 ICON \"{}\"\n1 VERSIONINFO\nFILEVERSION {numeric_version}\nPRODUCTVERSION {numeric_version}\nFILEOS 0x40004\nFILETYPE 0x1\nBEGIN\n BLOCK \"StringFileInfo\"\n BEGIN\n  BLOCK \"040904b0\"\n  BEGIN\n   VALUE \"FileDescription\", \"GPT File Browser\\0\"\n   VALUE \"ProductName\", \"GPT File Browser\\0\"\n   VALUE \"InternalName\", \"gpt-file-browser\\0\"\n   VALUE \"OriginalFilename\", \"GPT File Browser.exe\\0\"\n   VALUE \"FileVersion\", \"{version}\\0\"\n   VALUE \"ProductVersion\", \"{version}\\0\"\n  END\n END\n BLOCK \"VarFileInfo\"\n BEGIN\n  VALUE \"Translation\", 0x409, 1200\n END\nEND\n",
             ico.display().to_string().replace('\\', "/")
         ),
     )

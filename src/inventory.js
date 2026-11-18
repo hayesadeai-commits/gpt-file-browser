@@ -670,6 +670,13 @@ window.showJob = data => {
       message.textContent=file.verifying?'Sent to ChatGPT — checking Trash':'Sent to ChatGPT — waiting to check Trash';
       row.append(name,message);pending.append(row);
     }
+    // Rust lists a bounded number of pending files by name and counts the rest.
+    if(data.confirmation_rows_more){
+      const row=document.createElement('div'),name=document.createElement('span'),message=document.createElement('span');
+      row.className='job-item';name.textContent=`and ${data.confirmation_rows_more.toLocaleString()} more`;
+      message.textContent='Sent to ChatGPT — waiting to check Trash';
+      row.append(name,message);pending.append(row);
+    }
     $('job-list').append(pending);
   }
   $('job').hidden = false;

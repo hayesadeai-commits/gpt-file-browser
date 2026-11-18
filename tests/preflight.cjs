@@ -400,8 +400,8 @@ async function change(action,options,lookup){
 
 // Progress must not turn a sent request into success or release its reservation.
 {
- const nodes=new Map();
- const element=()=>({style:{},append(){},replaceChildren(){},remove(){}});
+ const nodes=new Map(),made=[];
+ const element=()=>{const el={style:{},append(){},replaceChildren(){},remove(){}};made.push(el);return el;};
  const $=id=>{if(!nodes.has(id))nodes.set(id,element());return nodes.get(id)};
  const reservedIds=new Set(['libfile_fixture']);
  const context=vm.createContext({window:{},document:{createDocumentFragment:element,createElement:element,getElementById:()=>null},$,reservedIds,reservedVersion:0,jobActive:false,queuedBatchCount:0,queuedFileCount:0,requestRender(){vm.runInContext('paintJob()',context)},updateActions(){}});
@@ -411,6 +411,11 @@ async function change(action,options,lookup){
  assert(reservedIds.has('libfile_fixture'));
  assert.match($('job-text').textContent,/1 requests sent.*0 confirmed in Trash/);
  assert.equal($('job-bar').style.width,'0%');assert.equal($('job-toggle').hidden,false);
+ // A long backlog arrives as a bounded list plus a count, drawn as one summary row.
+ made.length=0;context.window.showJob({...data,awaiting_confirmation:2000,confirmation_rows_more:1999});
+ assert(made.some(el=>/^and 1.?999 more$/.test(el.textContent||'')),'The uncounted backlog is summarised');
+ assert(made.length<20,'Drawing cost does not grow with the backlog');
+ assert(reservedIds.has('libfile_fixture'));
  context.window.showJob({...data,active:false,verified:1,remaining:0,awaiting_confirmation:0,confirmation_rows:[],outcomes:[{id:'libfile_fixture',name:'fixture.png',status:'verified',message:'Verified'}]});
  assert(!reservedIds.has('libfile_fixture'));assert.equal($('job-bar').style.width,'100%');
  console.log('Split progress checks passed: sent is pending, verified releases reservations.');

@@ -12,7 +12,7 @@ use windows::Win32::{
     Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect},
 };
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Placement {
     x: i32,
     y: i32,
@@ -132,11 +132,13 @@ impl Placement {
             && rect.right <= info.rcWork.right
             && rect.bottom <= info.rcWork.bottom
     }
+    /// Note the window's current placement and report whether it changed.
     /// Never overwrite normal bounds with the minimized offscreen coordinates.
-    pub fn save(&mut self, window: &Window, root: &Path) {
+    pub fn capture(&mut self, window: &Window) -> bool {
         if window.is_minimized() {
-            return;
+            return false;
         }
+        let before = *self;
         self.maximized = window.is_maximized();
         if !self.maximized
             && let Ok(pos) = window.outer_position()
@@ -147,6 +149,12 @@ impl Placement {
             self.width = size.width;
             self.height = size.height;
         }
+        *self != before
+    }
+    /// Store the placement for the next launch. Dragging produces a stream of move
+    /// events, so the caller writes once the window rests rather than on each one.
+    /// A failed write is ignored: remembered placement is a convenience.
+    pub fn write(&self, root: &Path) {
         if let Ok(bytes) = serde_json::to_vec(self) {
             let _ = std::fs::write(root.join("window.json"), bytes);
         }

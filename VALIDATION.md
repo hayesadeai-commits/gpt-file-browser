@@ -4,7 +4,7 @@ Documentation reviewed against the current source on November 16, 2026. This fil
 
 ## Latest recorded checks
 
-- 46 Rust unit tests passed.
+- 50 Rust unit tests passed.
 - JavaScript regression groups passed: preflight comparisons, Trash verification and pagination, the listing fetch (bounded retry, backoff, slim rows), hover lifecycle/retry behavior, Shift-click ranges, queue visibility with whole-collection filtering/sorting/caching, size and file-kind formatting, and JPG content fallback.
 - JavaScript syntax checks, `cargo fmt --check`, strict Clippy, and the release build (with path remapping) passed.
 - Startup smoke testing passed on the release build. Comparing the checkout before and after startup found no newly created files there.
@@ -109,7 +109,7 @@ A regression test covers current/legacy discovery, pagination-bearing requests, 
 
 A read-only live comparison traversed the full legacy node listing, all pages of the 50-item POST listing, and the folder-only node listing. File ID sets and every normalized metadata field matched exactly: no missing, extra, duplicate, or changed files. Folder metadata matched exactly as well. A second complete POST listing produced the same result. The combined POST/folder traversal took less than half the legacy traversal time in that comparison; exact private inventory counts and timings remain outside this repository.
 
-The default scanner now combines the verified 50-item POST file listing with folder-only discovery. It keeps separate cursor namespaces, waits for both traversals, and falls back to a fresh legacy scan after invalid/refused fast responses. Unit tests cover nested folder metadata, completion with outstanding requests, cursor namespace separation, ignored scopes, repeated files, and discarding partial fast results before fallback. The JavaScript transport harness verifies POST body preservation and bounded retry as well as the legacy GET behavior.
+The default scanner now combines the verified 50-item POST file listing with folder-only discovery. It keeps separate cursor namespaces, waits for both traversals, and falls back to a fresh legacy scan after invalid/refused fast responses. Unit tests cover nested folder metadata, completion with outstanding requests, cursor namespace separation, ignored scopes, repeated files, discarding partial fast results before fallback, and limiting a fallback caused by an unanswered request to the scan in progress. The JavaScript transport harness verifies POST body preservation and bounded retry as well as the legacy GET behavior.
 
 This comparison verified listing and metadata equivalence, not mutation speed or live deletion/restore behavior. No cloud files were changed during the investigation. A successful 100-item first-page probe was not used to claim full coverage or to increase the production page size.
 
@@ -119,7 +119,7 @@ The updated application also completed a full live hybrid scan with the same fil
 
 Trash batches now run four request slots and four independent verification slots simultaneously, retaining the existing preflight and readback checks. Pending confirmations do not impose a separate backlog cap on sending. Each request is associated with its batch nonce and file ID. A send slot is released after the mutation response; the file remains reserved until its verified/failed/uncertain result. Progress distinguishes requests sent from verified moves. Restores remain sequential. Stop/failure/context changes prevent new dispatch and allow already-started verification to complete; the next batch cannot start while any file remains in flight.
 
-The Rust tests exercise independent send/readback capacity, continued sending beyond 12 unfinished files, duplicate send callbacks, readback draining after Stop, receipt credential exclusion, the four-request cap, out-of-order completion, duplicate prevention, stopping with another file outstanding, receipt persistence for all active files, and sequential restore. The Node harness runs the actual per-file script with a simulated delayed service and asserts that each overlapping file receives its own preflight, exactly one delete, and positive Trash readback. A controlled-latency comparison demonstrated lower elapsed time with four in flight; this is not a live-service throughput measurement. No cloud files were deleted for this change.
+The Rust tests exercise independent send/readback capacity, continued sending beyond 12 unfinished files, duplicate send callbacks, readback draining after Stop, receipt credential exclusion, the four-request cap, out-of-order completion, duplicate prevention, stopping with another file outstanding, receipt persistence for all active files, reserving a group of sends for one receipt write and abandoning that group unsent if the write fails, a bounded pending list in the progress data, and sequential restore. The Node harness runs the actual per-file script with a simulated delayed service and asserts that each overlapping file receives its own preflight, exactly one delete, and positive Trash readback. A controlled-latency comparison demonstrated lower elapsed time with four in flight; this is not a live-service throughput measurement. No cloud files were deleted for this change.
 
 ## Confirmation bridge and bounded diagnostic log
 
@@ -129,7 +129,7 @@ The Windows smoke test reproduced the cause: DevTools returned the timestamp as 
 
 ## Window placement and wording
 
-Window bounds are saved outside the checkout. Placement tests cover taskbar clearance, a disconnected display, oversized saved bounds, and negative monitor coordinates. Smoke tests do not overwrite saved window settings. Helper text, progress messages, browser sign-in guidance and troubleshooting instructions use plain English. Queue logs distinguish active sends, active checks and waiting checks without recording file identities.
+Window bounds are saved outside the checkout, once the window rests after moving or resizing and on close; the write itself is not covered by an automated test. Placement tests cover taskbar clearance, a disconnected display, oversized saved bounds, and negative monitor coordinates. Smoke tests do not overwrite saved window settings. Helper text, progress messages, browser sign-in guidance and troubleshooting instructions use plain English. Queue logs distinguish active sends, active checks and waiting checks without recording file identities.
 
 The Windows startup smoke test also checks the actual window frame against the monitor work area, including taskbar clearance, and passed. The existing diagnostic log parsed successfully and its queue counts were internally consistent.
 

@@ -50,6 +50,9 @@ pub struct Job {
 }
 pub const SEND_LIMIT: usize = 4;
 pub const VERIFY_LIMIT: usize = 4;
+/// Most files awaiting readback that the progress strip lists by name; the rest are
+/// counted, so a long backlog costs no more to publish and draw than a short one.
+pub const PENDING_ROWS_SHOWN: usize = 50;
 
 #[derive(Clone)]
 pub struct Confirmation {
@@ -149,6 +152,42 @@ pub fn validate_queue(
 }
 
 impl Job {
+    /// Files sent and awaiting readback, for display: those being checked now, then
+    /// those waiting, up to `PENDING_ROWS_SHOWN`. The flag is whether a check is running.
+    pub fn pending_rows(&self) -> Vec<(&FileRow, bool)> {
+        let checking = self.confirmations.iter().filter(|(_, c)| c.verifying);
+        let waiting = self.confirmations.iter().filter(|(_, c)| !c.verifying);
+        checking
+            .chain(waiting)
+            .filter_map(|(id, c)| self.current.get(id).map(|f| (f, c.verifying)))
+            .take(PENDING_ROWS_SHOWN)
+            .collect()
+    }
+    /// Reserve every send the free slots allow, so that one receipt write can record
+    /// all of them before any request leaves.
+    pub fn reserve_sends(&mut self) -> Vec<FileRow> {
+        std::iter::from_fn(|| self.take_next()).collect()
+    }
+    /// Give up reserved files that were never sent and stop the batch. The first file
+    /// carries the reason; the others, and everything not yet started, are skipped.
+    pub fn abandon(&mut self, rows: impl IntoIterator<Item = FileRow>, reason: &str) {
+        self.stop = true;
+        for (n, row) in rows.into_iter().enumerate() {
+            self.current.remove(&row.id);
+            let (status, message) = if n == 0 {
+                ("failed", reason)
+            } else {
+                ("skipped", "Not attempted after batch stopped.")
+            };
+            self.outcomes.push(Outcome {
+                id: row.id,
+                name: row.name,
+                status: status.into(),
+                message: message.into(),
+            });
+        }
+        self.take_next();
+    }
     /// Convert a completed send into pending verification without releasing its ID.
     pub fn request_sent(&mut self, id: &str, receipt: Confirmation) -> bool {
         if self.action != Action::Trash
@@ -402,6 +441,83 @@ mod tests {
             "Stopping sends must still drain queued verification"
         );
         assert_eq!(job.outcomes.len(), 4);
+    }
+    #[test]
+    fn pending_rows_are_bounded_and_list_running_checks_first() {
+        let mut job = Job {
+            action: Action::Trash,
+            remaining: VecDeque::new(),
+            current: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
+            outcomes: vec![],
+            stop: false,
+        };
+        for i in 0..120 {
+            let id = format!("libfile_{i:03}");
+            job.current.insert(id.clone(), row(&id));
+            let receipt = Confirmation {
+                session: service::Session {
+                    url: String::new(),
+                    authorization: "fixture".into(),
+                    account: None,
+                },
+                sent: 1,
+                mutation_status: Some(200),
+                // The last four by ID are the ones being checked.
+                verifying: i >= 116,
+            };
+            assert!(job.request_sent(&id, receipt));
+        }
+        let rows = job.pending_rows();
+        assert_eq!(rows.len(), PENDING_ROWS_SHOWN);
+        assert!(rows[..VERIFY_LIMIT].iter().all(|(_, checking)| *checking));
+        assert!(rows[VERIFY_LIMIT..].iter().all(|(_, checking)| !*checking));
+        assert_eq!(rows[0].0.id, "libfile_116");
+        assert_eq!(rows[VERIFY_LIMIT].0.id, "libfile_000");
+        // A short backlog is listed in full.
+        for i in 10..120 {
+            let id = format!("libfile_{i:03}");
+            job.confirmations.remove(&id);
+            job.current.remove(&id);
+        }
+        assert_eq!(job.pending_rows().len(), 10);
+    }
+    #[test]
+    fn reserved_sends_fill_the_free_slots_and_can_be_abandoned_unsent() {
+        let mut job = Job {
+            action: Action::Trash,
+            remaining: (0..7).map(|i| row(&format!("libfile_{i}"))).collect(),
+            current: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
+            outcomes: vec![],
+            stop: false,
+        };
+        let reserved = job.reserve_sends();
+        assert_eq!(reserved.len(), SEND_LIMIT);
+        assert_eq!(job.current.len(), SEND_LIMIT);
+        assert!(
+            job.reserve_sends().is_empty(),
+            "No slot is free until a send returns"
+        );
+        // The receipt could not be written: none of the reserved files may be sent.
+        job.abandon(reserved, "Could not save the action log");
+        assert!(job.stop && job.current.is_empty() && job.remaining.is_empty());
+        let statuses: Vec<_> = job.outcomes.iter().map(|o| o.status.as_str()).collect();
+        assert_eq!(
+            statuses,
+            [
+                "failed", "skipped", "skipped", "skipped", "skipped", "skipped", "skipped"
+            ]
+        );
+        assert_eq!(job.outcomes[0].message, "Could not save the action log");
+        assert_eq!(job.requests_sent, 0);
+        // Restores reserve one at a time.
+        job.action = Action::Restore;
+        job.stop = false;
+        job.remaining = vec![row("libfile_x"), row("libfile_y")].into();
+        assert_eq!(job.reserve_sends().len(), 1);
     }
     #[test]
     fn lookup_hints_merge_only_explicit_answers() {

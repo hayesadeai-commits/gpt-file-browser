@@ -70,6 +70,11 @@ const PAGE_SIZES: [Option<u32>; 3] = [Some(100), Some(50), None];
 /// Upper bound on overlapping listing requests. Each cursor chain stays sequential;
 /// only independent folders are read at the same time.
 const SCAN_CONCURRENCY: usize = 6;
+/// Longest the action receipt may lag behind results while no request is being sent.
+/// A receipt is always written before a request leaves and when a batch ends.
+const JOURNAL_INTERVAL: Duration = Duration::from_secs(1);
+/// How long the window must rest after moving or resizing before its placement is saved.
+const PLACEMENT_SETTLE: Duration = Duration::from_millis(400);
 /// Outstanding image loads across thumbnails and hover previews, including old epochs.
 const PREVIEW_LIMIT: usize = 10;
 
@@ -146,8 +151,11 @@ struct Scan {
     size: usize,
     /// The size index of the last traversal that completed, once one has.
     proven: Option<usize>,
-    /// Fallback is remembered for this session after the fast endpoint fails.
+    /// Use the full nodes traversal instead of the fast listing.
     legacy: bool,
+    /// The fallback followed an unanswered request rather than a refusal or a wrong
+    /// answer, so it lasts for the current scan only and the next scan tries fast again.
+    retry_fast: bool,
 }
 
 impl Scan {
@@ -167,6 +175,25 @@ impl Scan {
         };
         self.pending.clear();
         self.running = true;
+    }
+    /// Start a scan the user asked for. A fallback caused only by a network failure
+    /// does not carry over to it.
+    fn start_new(&mut self) {
+        if self.retry_fast {
+            self.legacy = false;
+            self.retry_fast = false;
+        }
+        self.restart();
+    }
+    /// Discard the fast listing's partial result and restart with the full traversal.
+    /// A refusal or wrong answer keeps the fallback for the rest of the session; an
+    /// unanswered request keeps it only until the next scan.
+    fn fall_back(&mut self, error: &PageError) {
+        self.legacy = true;
+        self.retry_fast = matches!(error, PageError::Transport(_));
+        self.size = 0;
+        self.proven = None;
+        self.restart();
     }
     /// Stop issuing and accepting pages. The partial snapshot stays visible but incomplete.
     fn halt(&mut self, error: impl Into<String>) {
@@ -388,13 +415,13 @@ fn patch_view(
     ));
 }
 
-/// Publish progress and the outcomes not yet sent, without mutation credentials.
-/// `sent` tracks how many outcomes of this job the shell already holds.
-fn publish_job(shell: &wry::WebView, job: &changes::Job, id: u64, sent: &mut usize) {
+/// Progress for the shell: totals, the outcomes from `offset` on, and a bounded list
+/// of the files awaiting readback. Mutation credentials are never included.
+fn job_progress(job: &changes::Job, id: u64, offset: usize) -> Value {
     let count = |status: &str| job.outcomes.iter().filter(|o| o.status == status).count();
     let (verified, skipped) = (count("verified"), count("skipped"));
-    let offset = (*sent).min(job.outcomes.len());
-    let data = json!({
+    let pending = job.pending_rows();
+    json!({
         "id": id,
         "action": job.action,
         "active": !job.current.is_empty(),
@@ -404,12 +431,19 @@ fn publish_job(shell: &wry::WebView, job: &changes::Job, id: u64, sent: &mut usi
         "requests_sent": job.requests_sent,
         "awaiting_confirmation": job.confirmations.len(),
         "sending": job.current.len().saturating_sub(job.confirmations.len()),
-        "confirmation_rows": job.confirmations.iter().filter_map(|(id,c)| job.current.get(id).map(|f|json!({"id":id,"name":f.name,"verifying":c.verifying}))).collect::<Vec<_>>(),
+        "confirmation_rows": pending.iter().map(|(f, verifying)| json!({"id": f.id, "name": f.name, "verifying": verifying})).collect::<Vec<_>>(),
+        "confirmation_rows_more": job.confirmations.len().saturating_sub(pending.len()),
         "skipped": skipped,
         "attention": job.outcomes.len() - verified - skipped,
         "offset": offset,
         "outcomes": &job.outcomes[offset..],
-    });
+    })
+}
+/// Publish progress and the outcomes not yet sent.
+/// `sent` tracks how many outcomes of this job the shell already holds.
+fn publish_job(shell: &wry::WebView, job: &changes::Job, id: u64, sent: &mut usize) {
+    let offset = (*sent).min(job.outcomes.len());
+    let data = job_progress(job, id, offset);
     *sent = job.outcomes.len();
     call(shell, "showJob", &data);
 }
@@ -460,6 +494,8 @@ struct Batches {
     sent: usize,
     /// What earlier files learned about confirming a change without reading all of Trash.
     lookup: changes::TrashLookup,
+    /// When the active job's receipt was last written.
+    journaled: Option<Instant>,
 }
 
 impl Batches {
@@ -478,6 +514,7 @@ impl Batches {
         if let Some(r) = changes::next_batch(self.job.as_ref(), &mut self.waiting) {
             self.active_nonce = r.nonce;
             self.sent = 0;
+            self.journaled = None;
             let mut next = changes::Job {
                 action: r.action,
                 remaining: r.files.into(),
@@ -495,6 +532,7 @@ impl Batches {
                 self.lookup,
                 proxy,
                 root,
+                &mut self.journaled,
             );
             self.job = Some(next);
             if result.is_err() {
@@ -551,6 +589,12 @@ fn job_receipt(job: &changes::Job) -> Value {
 
 /// Pump independent send/readback pools, journaling reservations before mutation.
 /// Files stay reserved until readback, without holding send slots; reads never resend mutations.
+///
+/// The receipt holds the whole batch, so it is written once per pump rather than once
+/// per file: always before any reserved request is sent and when a stop skips queued
+/// files, otherwise only when `JOURNAL_INTERVAL` has passed. A result that is not yet
+/// on disk leaves its file listed as pending, which is the cautious reading.
+#[allow(clippy::too_many_arguments)]
 fn change_next(
     browser: &wry::WebView,
     session: &service::Session,
@@ -559,6 +603,7 @@ fn change_next(
     lookup: changes::TrashLookup,
     proxy: &Proxy,
     root: &Path,
+    journaled: &mut Option<Instant>,
 ) -> Result<(), String> {
     // Verification has its own capacity and remains active when sending is stopped.
     while let Some((id, receipt)) = job.next_confirmation() {
@@ -568,28 +613,30 @@ fn change_next(
             let _ = proxy.send_event(AppEvent::ChangeResult(nonce, id, Err(e)));
         }
     }
-    while let Some(row) = job.take_next() {
-        let result = journal(root, job, nonce).and_then(|_| {
-            changes::run(
-                browser,
-                session,
-                &row,
-                job.action,
-                nonce,
-                lookup,
-                proxy.clone(),
-            )
-        });
-        if let Err(e) = result {
-            job.current.remove(&row.id);
-            job.stop = true;
-            job.outcomes.push(changes::Outcome {
-                id: row.id,
-                name: row.name,
-                status: "failed".into(),
-                message: e.clone(),
-            });
-            job.take_next();
+    let skipping = job.stop && !job.remaining.is_empty();
+    let reserved = job.reserve_sends();
+    let due = journaled.is_none_or(|at| at.elapsed() >= JOURNAL_INTERVAL);
+    if !reserved.is_empty() || skipping || due {
+        if let Err(e) = journal(root, job, nonce) {
+            // Without a receipt nothing reserved here may be sent.
+            job.abandon(reserved, &e);
+            return Err(e);
+        }
+        *journaled = Some(Instant::now());
+    }
+    let mut unsent = reserved.into_iter();
+    while let Some(row) = unsent.next() {
+        let started = changes::run(
+            browser,
+            session,
+            &row,
+            job.action,
+            nonce,
+            lookup,
+            proxy.clone(),
+        );
+        if let Err(e) = started {
+            job.abandon(std::iter::once(row).chain(unsent), &e);
             return Err(e);
         }
     }
@@ -793,7 +840,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         active_nonce: 0,
         sent: 0,
         lookup: changes::TrashLookup::default(),
+        journaled: None,
     };
+    // Set while the window is moving or resizing; its placement is written once it rests.
+    let mut placement_due: Option<Instant> = None;
     // A completed old-session action is still journaled, but must not repopulate new-session rows.
     let mut job_context_valid = true;
     let mut connection_deadline: Option<Instant> = None;
@@ -806,10 +856,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut smoke_recorded = false;
     // Every callback is serialized here. The deadlines wake an otherwise idle event loop.
     event_loop.run(move |event, _, flow| {
-        *flow = smoke_deadline
-            .or(connection_deadline)
+        *flow = [smoke_deadline, connection_deadline, placement_due]
+            .into_iter()
+            .flatten()
+            .min()
             .map(ControlFlow::WaitUntil)
             .unwrap_or(ControlFlow::Wait);
+        if placement_due.is_some_and(|t| Instant::now() >= t) {
+            placement_due = None;
+            placement.write(&root);
+        }
         if connection_deadline.is_some_and(|t| Instant::now() >= t) {
             connection_deadline = None;
             scan.halt(MSG_CONNECT_FAILED);
@@ -825,13 +881,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let mut status: Option<Note> = None;
         match event {
-            Event::WindowEvent {event:WindowEvent::Moved(_),..} => {if !smoke_mode {placement.save(&window,&root);}},
+            Event::WindowEvent {
+                event: WindowEvent::Moved(_),
+                ..
+            } => {
+                if !smoke_mode && placement.capture(&window) {
+                    placement_due = Some(Instant::now() + PLACEMENT_SETTLE);
+                }
+            }
             // Finish every in-flight verification before closing; skip unstarted files.
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                if !smoke_mode {placement.save(&window,&root);}
+                if !smoke_mode {
+                    placement.capture(&window);
+                    placement.write(&root);
+                    placement_due = None;
+                }
                 if batches.busy() {
                     if let Some(j) = batches.job.as_mut() {
                         j.stop = true;
@@ -848,7 +915,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. },
                 ..
             } => {
-                if !smoke_mode {placement.save(&window,&root);}
+                if !smoke_mode && placement.capture(&window) {
+                    placement_due = Some(Instant::now() + PLACEMENT_SETTLE);
+                }
                 // The shell re-measures its browser pane and reports it after this resize.
                 let sz = window.inner_size().to_logical::<f64>(window.scale_factor());
                 let _ = shell.set_bounds(bounds(0., 0., sz.width, sz.height));
@@ -905,7 +974,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             call(&shell, "clearPreviews", &Value::Null);
                             review = None;
                             connection_deadline = None;
-                            scan.restart();
+                            scan.start_new();
                             scan.usage = None;
                             scan.started = Some(Instant::now());
                             let _ = browser.set_visible(false);
@@ -1276,7 +1345,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             // A failed fast file/folder listing never becomes a partial "complete"
                             // inventory. Clear all its outstanding requests and restart legacy traversal.
                             Err(error) if scan.falls_back_for(&error) => {
-                                scan.legacy=true;scan.size=0;scan.proven=None;scan.restart();
+                                scan.fall_back(&error);
                                 let begun=match &session {Some(s)=>scan.begin(&browser,s,&proxy),None=>Err("Session unavailable".into())};
                                 if let Err(e)=begun {scan.fail(e);}
                                 true
@@ -1416,8 +1485,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // An ambiguous/rejected response still requires readback, but does not
                         // justify sending more mutations while that ambiguity is resolved.
                         if http.is_none_or(|code|!(200..300).contains(&code)){j.stop=true;}
-                        if let Err(e)=journal(&root,j,n){j.stop=true;status=alert(e);}
-                        if let Some(s)=&session && let Err(e)=change_next(&browser,s,j,n,batches.lookup,&proxy,&root){status=alert(e);}
+                        if let Some(s)=&session && let Err(e)=change_next(&browser,s,j,n,batches.lookup,&proxy,&root,&mut batches.journaled){status=alert(e);}
                         publish_job(&shell,j,n,&mut batches.sent);
                     }else{
                         j.stop=true;let _=proxy.send_event(AppEvent::ChangeResult(n,id,Err("We could not check whether this file moved. Refresh Library and Trash before trying again.".into())));
@@ -1473,12 +1541,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         status: state,
                         message,
                     });
-                    // Persist this result even if another file is still verifying. Journal
-                    // failure stops new work but must not abandon already-started checks.
-                    if let Err(e)=journal(&root,j,n) {j.stop=true;status=alert(e);}
+                    // The pump records this result with the next requests it sends, or within
+                    // `JOURNAL_INTERVAL`. A failed write stops new work but never abandons
+                    // checks that have already started.
                     if let Some(s) = &session
-                        && let Err(e) =
-                            change_next(&browser, s, j, n, batches.lookup, &proxy, &root)
+                        && let Err(e) = change_next(
+                            &browser,
+                            s,
+                            j,
+                            n,
+                            batches.lookup,
+                            &proxy,
+                            &root,
+                            &mut batches.journaled,
+                        )
                     {
                         status = alert(e);
                     }
@@ -1596,6 +1672,43 @@ mod state_tests {
         assert!(job_receipt(&job)["pending"].is_null());
     }
     #[test]
+    fn progress_lists_a_bounded_number_of_pending_files() {
+        let row = |id: &str| inventory::parse_row(&json!({"id":id,"name":"fixture.txt"})).unwrap();
+        let mut job = changes::Job {
+            action: changes::Action::Trash,
+            current: BTreeMap::new(),
+            remaining: VecDeque::new(),
+            confirmations: BTreeMap::new(),
+            requests_sent: 0,
+            outcomes: vec![],
+            stop: false,
+        };
+        for i in 0..2000 {
+            let id = format!("libfile_{i:04}");
+            job.current.insert(id.clone(), row(&id));
+            job.request_sent(
+                &id,
+                changes::Confirmation {
+                    session: service::Session {
+                        url: String::new(),
+                        authorization: "fixture-token-secret".into(),
+                        account: None,
+                    },
+                    sent: 1,
+                    mutation_status: Some(200),
+                    verifying: false,
+                },
+            );
+        }
+        let progress = job_progress(&job, 7, 0);
+        let listed = progress["confirmation_rows"].as_array().unwrap().len();
+        assert_eq!(listed, changes::PENDING_ROWS_SHOWN);
+        assert_eq!(progress["confirmation_rows_more"], 2000 - listed);
+        assert_eq!(progress["awaiting_confirmation"], 2000);
+        assert_eq!(progress["remaining"], 2000);
+        assert!(!progress.to_string().contains("secret"));
+    }
+    #[test]
     fn private_storage_never_falls_back_to_the_project() {
         assert!(private_data_root(None).is_err());
         assert!(private_data_root(Some("".into())).is_err());
@@ -1683,6 +1796,30 @@ mod state_tests {
             inventory::ListingScope::Nodes
         );
         assert!(!scan.falls_back_for(&PageError::Refused("bad shape".into())));
+    }
+    #[test]
+    fn fallback_after_a_network_failure_lasts_one_scan_only() {
+        let first_scope = |scan: &mut Scan| scan.inv.next().unwrap().unwrap().scope;
+        // An unanswered request: finish this scan the slow way, then try fast again.
+        let mut scan = Scan::default();
+        scan.start_new();
+        scan.fall_back(&PageError::Transport("timeout".into()));
+        assert!(scan.running && scan.pending.is_empty());
+        assert_eq!(first_scope(&mut scan), inventory::ListingScope::Nodes);
+        assert!(!scan.falls_back_for(&PageError::Transport("timeout".into())));
+        // A page-size restart inside the same scan stays on the full traversal.
+        scan.restart();
+        assert_eq!(first_scope(&mut scan), inventory::ListingScope::Nodes);
+        scan.start_new();
+        assert_eq!(first_scope(&mut scan), inventory::ListingScope::Files);
+        assert!(scan.falls_back_for(&PageError::Transport("timeout".into())));
+        // A refusal or wrong answer: the fast listing is not tried again this session.
+        scan.fall_back(&PageError::Refused("bad shape".into()));
+        scan.start_new();
+        assert_eq!(first_scope(&mut scan), inventory::ListingScope::Nodes);
+        // A later network failure on the full traversal does not undo that.
+        scan.start_new();
+        assert!(scan.legacy && !scan.retry_fast);
     }
     #[test]
     fn page_size_falls_back_safely_and_keeps_what_works() {

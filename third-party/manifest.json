@@ -1,6 +1,6 @@
 {
   "target": "x86_64-pc-windows-msvc",
-  "cargo_lock_sha256": "cab7c3c341a3f3b8ebba7f7f224d4236d122a1d0b87fe485f975e8794d89b402",
+  "cargo_lock_sha256": "0d47c6fa8eda0742d17e3a44ef56cd6ed5a46370a6411ecce55312ce30c20e1d",
   "rust_toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
   "components": [
     {

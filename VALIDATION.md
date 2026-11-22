@@ -133,9 +133,9 @@ Window bounds are saved outside the checkout, once the window rests after moving
 
 The Windows startup smoke test also checks the actual window frame against the monitor work area, including taskbar clearance, and passed. The existing diagnostic log parsed successfully and its queue counts were internally consistent.
 
-## Version 1.0.0 release
+## Windows release package
 
-The release package is assembled from an explicit allowlist: the path-remapped Windows executable, README, MIT license, third-party notices and bundled license texts. Browser profiles, logs, settings, receipts, build caches and Git metadata are excluded. Cargo and Windows executable resource versions both use 1.0.0.
+The release package is assembled from an explicit allowlist: the path-remapped Windows executable, README, MIT license, third-party notices and bundled license texts. Browser profiles, logs, settings, receipts, build caches and Git metadata are excluded. The package version in Cargo also sets the file and product versions shown by Windows.
 
 ## Browser activity while the file list is open
 

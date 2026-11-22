@@ -35,7 +35,7 @@ use tao::{
     window::{Theme, WindowBuilder},
 };
 use wry::{
-    NewWindowResponse, Rect, WebContext, WebViewBuilder,
+    NewWindowResponse, Rect, WebContext, WebViewBuilder, WebViewExtWindows,
     dpi::{LogicalPosition, LogicalSize},
 };
 
@@ -643,6 +643,34 @@ fn change_next(
     Ok(())
 }
 
+/// Hide or show the native pane without putting the WebView2 page in the background.
+/// The Library, previews, and Trash checks use this page while the file list is shown.
+/// The child retains its bounds and session; hiding it prevents it from taking input.
+fn show_browser_pane(view: &wry::WebView, show: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNA, ShowWindow};
+
+    // SAFETY: this UI thread owns the live child HWND created by Wry.
+    unsafe {
+        let _ = ShowWindow(view.hwnd(), if show { SW_SHOWNA } else { SW_HIDE });
+    }
+}
+
+/// Check the two independent visibility settings even when the smoke test's
+/// parent window is hidden. The child style reports its own visibility.
+fn background_browser_ready(view: &wry::WebView) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GWL_STYLE, GetWindowLongW, WS_VISIBLE};
+    use windows::core::BOOL;
+
+    let mut page_active = BOOL::default();
+    // SAFETY: use the live HWND and controller on their owning UI thread.
+    unsafe {
+        let pane_style = GetWindowLongW(view.hwnd(), GWL_STYLE) as u32;
+        pane_style & WS_VISIBLE.0 == 0
+            && view.controller().IsVisible(&mut page_active).is_ok()
+            && page_active.as_bool()
+    }
+}
+
 /// Convert logical layout coordinates to WebView bounds, clamping empty dimensions.
 fn bounds(x: f64, y: f64, w: f64, h: f64) -> Rect {
     Rect {
@@ -820,6 +848,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
         .build_as_child(&window)?;
+    show_browser_pane(&browser, false);
+    // SAFETY: the controller is live and used on its owning UI thread.
+    unsafe {
+        browser.controller().SetIsVisible(true)?;
+    }
     capture::install(&browser, enabled.clone(), epoch.clone(), proxy.clone())?;
     let mut compare_pending = std::env::args().any(|a| a == "--compare-listings");
     let mut opened = false;
@@ -830,6 +863,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut session: Option<service::Session> = None;
     // Count actual outstanding work across UI epochs; clearing a cache does not cancel fetches.
     let mut preview_inflight = 0usize;
+    // One entry for each preview size and outcome per launch keeps the log useful
+    // without recording file identities or creating a line for each thumbnail.
+    let mut logged_preview_outcomes = HashSet::new();
     let mut scan = Scan::default();
     let mut trash = Trash::default();
     let mut review: Option<changes::Review> = None;
@@ -873,8 +909,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         if smoke_deadline.is_some_and(|t| Instant::now() >= t) {
             let on_screen=window_state::Placement::is_on_screen(&window);
-            if !smoke_recorded {diagnostics::record(&root,"window_smoke",json!({"within_work_area":on_screen}));smoke_recorded=true;}
-            if !shell_ready || !bridge_smoke_ok || !on_screen {
+            let browser_ready = background_browser_ready(&browser);
+            if !smoke_recorded {
+                diagnostics::record(
+                    &root,
+                    "window_smoke",
+                    json!({"within_work_area": on_screen, "background_browser_ready": browser_ready}),
+                );
+                smoke_recorded = true;
+            }
+            if !shell_ready || !bridge_smoke_ok || !on_screen || !browser_ready {
                 std::process::exit(2);
             }
             *flow = ControlFlow::Exit;
@@ -946,7 +990,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     // mutation promise. Keep the browser hidden until its verification finishes.
                     _ if batches.busy() && (navigates || cmd == "browser") => {
                         status = alert(MSG_NAV_PAUSED_JOB);
-                        let _ = browser.set_visible(false);
+                        show_browser_pane(&browser, false);
                         call(&shell, "showFiles", &Value::Null);
                     }
                     // The same navigation would discard in-flight listing requests and fail the
@@ -955,7 +999,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         status = alert(MSG_NAV_PAUSED_LISTING);
                     }
                     "browser" | "home" | "space" => {
-                        let _ = browser.set_visible(true);
+                        show_browser_pane(&browser, true);
                         if !opened || cmd != "browser" {
                             let url = if cmd == "space" { SPACE_URL } else { HOME_URL };
                             if browser.load_url(url).is_ok() {
@@ -964,7 +1008,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     "inventory" | "evidence" => {
-                        let _ = browser.set_visible(false);
+                        show_browser_pane(&browser, false);
                     }
                     // Abandon any earlier traversal; its outstanding replies become inert.
                     "scan" => {
@@ -977,7 +1021,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             scan.start_new();
                             scan.usage = None;
                             scan.started = Some(Instant::now());
-                            let _ = browser.set_visible(false);
+                            show_browser_pane(&browser, false);
                             // Requests run inside the signed-in page. If there is no session yet,
                             // or the view was left on another site, load Library and wait for it.
                             let on_chatgpt = browser
@@ -1269,7 +1313,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             if browser.load_url(&url).is_ok() {
                                 opened = true;
                             }
-                            let _ = browser.set_visible(true);
+                            show_browser_pane(&browser, true);
                             call(&shell, "selectBrowser", &Value::Null);
                         }
                     }
@@ -1609,6 +1653,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Release native capacity even for stale UI epochs; the shell rejects their images.
             Event::UserEvent(AppEvent::PreviewResult(epoch, id, modified, image, full, retry)) => {
                 preview_inflight = preview_inflight.saturating_sub(1);
+                let outcome = if retry {
+                    "browser_interrupted"
+                } else if image.is_some() {
+                    "ready"
+                } else {
+                    "unavailable"
+                };
+                if logged_preview_outcomes.insert((full, outcome)) {
+                    let kind = if full { "hover" } else { "thumbnail" };
+                    diagnostics::record(
+                        &root,
+                        "preview_result",
+                        json!({"kind": kind, "outcome": outcome}),
+                    );
+                }
                 let data = json!({
                     "epoch": epoch,
                     "id": id,

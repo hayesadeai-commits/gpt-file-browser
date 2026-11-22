@@ -43,7 +43,7 @@ The app stores its profiles and generated reports under `%LOCALAPPDATA%\GPTStora
 - `app-data/interface/`: local UI WebView profile.
 - `window.json`: last window position, size and maximized state, saved once the window stops moving or resizing and on close. The app keeps restored windows inside the nearest available screen, above the taskbar.
 - `reports/`: exported metadata, diagnostic reports, and action receipts.
-- `reports/diagnostic.log`: automatic queue/bridge diagnostics, limited to 30 days and 10 MiB (older entries may expire sooner at the size cap). Pruned on startup, daily while logging, and at the size limit. Contains event codes, times and aggregate counts, not filenames, file IDs, credentials or session data. This retention limit applies to the diagnostic log, not exported reports or action receipts.
+- `reports/diagnostic.log`: automatic queue, preview and browser diagnostics, limited to 30 days and 10 MiB (older entries may expire sooner at the size cap). Pruned on startup, daily while logging, and at the size limit. Contains event codes, times and aggregate counts, not filenames, file IDs, credentials or session data. This retention limit applies to the diagnostic log, not exported reports or action receipts.
 
 These files may contain credentials, filenames, and account identifiers. Keep them private. Chrome's profile is not imported or modified. If `LOCALAPPDATA` is missing or relative, startup fails instead of falling back to the project directory. Files saved through ChatGPT's native Download dialog go to the destination you choose.
 

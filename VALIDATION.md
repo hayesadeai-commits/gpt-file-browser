@@ -1,6 +1,6 @@
 # Validation
 
-Documentation reviewed against the current source on November 16, 2026. This file contains no account inventories, personal filenames, file IDs, or machine-specific paths.
+Documentation reviewed against the current source on November 22, 2026. This file contains no account inventories, personal filenames, file IDs, or machine-specific paths.
 
 ## Latest recorded checks
 
@@ -14,7 +14,7 @@ Documentation reviewed against the current source on November 16, 2026. This fil
 Not verified against the live service in a recorded test:
 
 - Larger-than-50 file pages and large-scale concurrent folder reads. Their fallback (step down to the node-listing service default with no size parameter) is covered by unit tests only. The scan-complete status line reports pages and seconds so the effect can be seen on a real Library.
-- The direct Trash lookup. ChatGPT's own client sends the ID filter (`allowlist_ids`) and the name search (`q`) in the same listing request it uses for Trash, but whether they are honoured together with `trashed_only` is unconfirmed. If they are not, the script learns that on the first file and reads the complete Trash listing instead; the mocked harness asserts that it then sends no filtered requests at all.
+- The name filter (`q`) combined with `trashed_only`. A November 22 read-only check confirmed that the ID filter (`allowlist_ids`) can find existing Trash entries. The complete Trash listing remains the fallback when a direct lookup is unavailable.
 - Trash and restore with the current confirmation reads. Each file still gets exactly one mutation, in the same sequence.
 
 These results describe the tested revision. Re-run checks after changes; they are not a guarantee about future service responses or later additions to the repository.
@@ -136,3 +136,7 @@ The Windows startup smoke test also checks the actual window frame against the m
 ## Version 1.0.0 release
 
 The release package is assembled from an explicit allowlist: the path-remapped Windows executable, README, MIT license, third-party notices and bundled license texts. Browser profiles, logs, settings, receipts, build caches and Git metadata are excluded. Cargo and Windows executable resource versions both use 1.0.0.
+
+## Browser activity while the file list is open
+
+Library requests share the embedded ChatGPT browser. The app hides its native pane while keeping the WebView2 page active. The Windows smoke test checks both settings. A live read-only check with the pane hidden retrieved and rendered PNG and JPG previews, and confirmed existing Trash entries using the same filtered listing as the app. The check performed only reads and reported timings, outcomes and HTTP codes. Preview logging now records the first occurrence of each outcome for thumbnails and larger previews per launch.
